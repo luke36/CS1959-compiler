@@ -1,7 +1,7 @@
 ;; todo: use make-(nopless-)begin (it can really affect optimisations!)
 
 (eval-when (compile load eval)
-  (optimize-level 2)
+  (optimize-level 3)
   (case-sensitive #t)
 )
 
@@ -9,57 +9,7 @@
 (load "helpers.scm")
 (load "driver.scm")
 (load "fmts.pretty")
-
-(compiler-passes '(
-  parse-scheme
-  convert-primitive
-  convert-complex-datum
-  optimize-direct-call
-  uncover-assigned
-  purify-letrec
-  optimize-constant
-  optimize-useless
-  convert-assignments
-  remove-anonymous-lambda
-  sanitize-binding-forms
-  uncover-free
-  convert-closures
-  optimize-known-call
-  uncover-well-known
-  optimize-free
-  optimize-self-reference
-  analyze-closure-size
-  introduce-procedure-primitives
-  lift-letrec
-  normalize-context
-  specify-representation
-  uncover-locals
-  remove-let
-  verify-uil
-  remove-complex-opera*
-  flatten-set!
-  impose-calling-conventions
-  expose-allocation-pointer
-  uncover-frame-conflict
-  pre-assign-frame
-  assign-new-frame
-  (iterate
-    finalize-frame-locations
-    select-instructions
-    uncover-register-conflict
-    assign-registers
-    (break when everybody-home?)
-    assign-frame)
-  discard-call-live
-  finalize-locations
-  expose-frame-var
-  expose-memory-operands
-  expose-basic-blocks
-  optimize-jumps
-  flatten-program
-  analyze-code-size
-  generate-x86-64
-))
+(load "a15-wrapper.scm")
 
 (define take
   (lambda (n lst)
@@ -159,6 +109,12 @@
     (if (null? binding)
         body
         `(letrec ,binding ,body))))
+
+(define make-let-assign
+  (lambda (binding assign body)
+    (if (null? binding)
+        body
+        `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
   `(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
@@ -332,7 +288,7 @@
   (lambda (p)
     (set! bindings '())
     (let ([p^ (Expr p)])
-      `(letrec ,(map cdr bindings) ,p^))))
+      (make-letrec (map cdr bindings) p^))))
 
 (define-who convert-complex-datum
   (define bindings #f)
@@ -387,8 +343,8 @@
     (set! bindings '())
     (set! fillings '())
     (let ([p^ (Expr p)])
-      `(let ,bindings
-         ,(make-begin `(,@fillings ,p^))))))
+      (make-let bindings
+        (make-begin `(,@fillings ,p^))))))
 
 (define-who uncover-assigned
   (define Expr
@@ -473,17 +429,16 @@
                 [tmp* (map unique-name c-x*)]
                 [innermost
                   (if (null? complex*) body
-                      `(begin
-                         (let ([,tmp* ,c-e*] ...)
-                           (assigned ()
-                             (begin (set! ,c-x* ,tmp*) ...)))
-                         ,body))])
-           `(let ,simple*
-              (assigned ()
-                (let ((,c-x* (void)) ...)
-                  (assigned ,c-x*
-                    (letrec ,lambda*
-                      ,innermost)))))))]
+                      (make-begin
+                        `((let ([,tmp* ,c-e*] ...)
+                            (assigned ()
+                              (begin (set! ,c-x* ,tmp*) ...)))
+                          ,body)))])
+           (make-let-assign simple* '()
+             (make-let-assign `([,c-x* (void)] ...)
+               c-x*
+               (make-letrec lambda*
+                 innermost)))))]
       [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
       [(lambda (,uvar* ...) (assigned (,as* ...) ,[expr]))
        `(lambda (,uvar* ...) (assigned (,as* ...) ,expr))]
@@ -538,7 +493,7 @@
                  [(car cd-v) (values cq-e cq-v)]
                  [else (values at-e at-v)])]
           [(begin ,[(Expr env) -> e* v*] ... ,[(Expr env) -> e v])
-           (values `(begin ,e* ... ,e) v)]
+           (values (make-begin `(,e* ... ,e)) v)]
           [(let ([,uvar* ,[(Expr env) -> e* v*]] ...)
              (assigned (,a* ...) ,body))
            (let ([env^ (append
@@ -599,22 +554,30 @@
                [(([,x* ,[(Expr 'value) -> expr* u1*]] ...) .
                  ([,y* ,[(Expr 'effect) -> effect* u2*]] ...))
                 (values
-                  (if (null? effect*)
-                      `(let ([,x* ,expr*] ...)
-                         (assigned ,(intersection x* as*)
-                           ,body))
-                      (make-begin
-                        `(,@effect*
-                           (let ([,x* ,expr*] ...)
-                             (assigned ,(intersection x* as*)
-                               ,body)))))
+                  (make-begin
+                    `(,@effect*
+                       ,(make-let-assign `([,x* ,expr*] ...)
+                          (intersection x* as*) body)))
                   (difference (union u (apply union u1*) (apply union u2*)) x*))]))]
           [(letrec ([,x* ,[(Expr 'value) -> expr* u*]] ...) ,[body u])
-           ;; can improve. inspect the graph
-           (values
-             `(letrec ([,x* ,expr*] ...)
-                ,body)
-             (difference (union u (apply union u*)) x*))]
+           (let ([bd* (map list x* expr* u*)])
+             (let-values ([(usbd* u^)
+                           (let partition ([uncertain bd*] [useful '()] [used u])
+                             (let loop ([bd* uncertain] [useful useful] [uncertain '()] [used used]
+                                        [same #t])
+                               (if (null? bd*)
+                                   (if same
+                                       (values useful used)
+                                       (partition uncertain useful used))
+                                   (if (memq (caar bd*) used)
+                                       (loop (cdr bd*) (cons (car bd*) useful) uncertain
+                                         (union (caddar bd*) used) #f)
+                                       (loop (cdr bd*) useful (cons (car bd*) uncertain)
+                                         used same)))))])
+               (values
+                 (make-letrec (map (lambda (bd) (list (car bd) (cadr bd))) usbd*)
+                   body)
+                 (difference u^ x*))))]
           [(set! ,x ,[(Expr 'value) -> e u])
            (values
              `(set! ,x ,e)
@@ -1040,7 +1003,7 @@
         [(if ,[Pred -> cond] ,[Value -> conseq] ,[Value -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Value -> value])
-         `(begin ,effect* ... ,value)]
+         (make-begin `(,effect* ... ,value))]
         [(let ([,uvar* ,[Value -> body*]] ...) ,[Value -> body])
          `(let ([,uvar* ,body*] ...) ,body)]
         [(,prim ,[Value -> rand*] ...) (guard (value-primitive? prim))
@@ -1061,7 +1024,7 @@
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
-         `(begin ,effect* ... ,pred)]
+         (make-begin `(,effect* ... ,pred))]
         [(let ([,uvar* ,[Value -> body*]] ...) ,[Pred -> body])
          `(let ([,uvar* ,body*] ...) ,body)]
         [(,prim ,[Value -> rand*] ...) (guard (value-primitive? prim))
@@ -1083,7 +1046,7 @@
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
-         `(begin ,effect* ... ,effect)]
+         (make-begin `(,effect* ... ,effect))]
         [(let ([,uvar* ,[Value -> body*]] ...) ,[Effect -> body])
          `(let ([,uvar* ,body*] ...) ,body)]
         [(,prim ,[Effect -> rand*] ...) (guard (value-primitive? prim))
@@ -1302,7 +1265,7 @@
     (lambda (t)
       (match t
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Tail -> tail u c])
-         (values `(begin ,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,tail)
+         (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,tail))
            (apply union (cons u u*)) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Tail -> tail u c])
          (values `(begin ,effect* ... ,tail)
@@ -1324,7 +1287,7 @@
     (lambda (p)
       (match p
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Pred -> pred u c])
-         (values `(begin ,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,pred)
+         (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,pred))
            (apply union (cons u u*)) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Pred -> pred u c])
          (values `(begin ,effect* ... ,pred)
@@ -1340,7 +1303,7 @@
     (lambda (e)
       (match e
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Effect -> effect u c])
-         (values `(begin ,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,effect)
+         (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,effect))
            (apply union (cons u u*)) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Effect -> effect u c])
          (values `(begin ,effect* ... ,effect)
@@ -1359,7 +1322,7 @@
     (lambda (v)
       (match v
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Value -> value u c])
-         (values `(begin ,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,value)
+         (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,value))
            (apply union (cons u u*)) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Value -> value u c])
          (values `(begin ,effect* ... ,value)
@@ -1475,7 +1438,7 @@
               ,(do-flatten-set! uvar conseq)
               ,(do-flatten-set! uvar alter))]
         [(begin ,effect* ... ,value)
-         `(begin ,effect* ... ,(do-flatten-set! uvar value))]
+         (make-begin `(,effect* ... ,(do-flatten-set! uvar value)))]
         [,x `(set! ,uvar ,value)])))
   (define do-flatten-mset!
     (lambda (base offset value)
@@ -1485,7 +1448,7 @@
               ,(do-flatten-mset! base offset conseq)
               ,(do-flatten-mset! base offset alter))]
         [(begin ,effect* ... ,value)
-         `(begin ,effect* ... ,(do-flatten-mset! base offset value))]
+         (make-begin `(,effect* ... ,(do-flatten-mset! base offset value)))]
         [,x `(mset! ,base ,offset ,value)])))
   (define Body
     (lambda (b)
@@ -1496,13 +1459,13 @@
     (lambda (t)
       (match t
         [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Tail -> tail]) `(begin ,effect* ... ,tail)]
+        [(begin ,[Effect -> effect*] ... ,[Tail -> tail]) (make-begin `(,effect* ... ,tail))]
         [,x x])))
   (define Pred
     (lambda (p)
       (match p
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) `(begin ,effect* ... ,pred)]
+        [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) (make-begin `(,effect* ... ,pred))]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -1513,13 +1476,13 @@
         [(mset! ,base ,offset ,[Value -> value])
          (do-flatten-mset! base offset value)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) `(begin ,effect* ... ,effect)]
+        [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
         [,x x])))
   (define Value
     (lambda (v)
       (match v
         [(if ,[Pred -> cond] ,[Value -> conseq] ,[Value -> alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Value -> value]) `(begin ,effect* ... ,value)]
+        [(begin ,[Effect -> effect*] ... ,[Value -> value]) (make-begin `(,effect* ... ,value))]
         [,x x])))
   (lambda (p)
     (match p
@@ -1645,7 +1608,7 @@
         [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
-         `(begin ,effect* ... ,tail)]
+         (make-begin `(,effect* ... ,tail))]
         [,x x])))
   (define Pred
     (lambda (p)
@@ -1653,7 +1616,7 @@
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
-         `(begin ,effect* ... ,pred)]
+         (make-begin `(,effect* ... ,pred))]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -1664,7 +1627,7 @@
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
-         `(begin ,effect* ... ,effect)]
+         (make-begin `(,effect* ... ,effect))]
         [,x x])))
   (lambda (p)
     (match p
@@ -1828,7 +1791,7 @@
           [(if ,[(Pred size) -> cond] ,[(Tail size) -> conseq] ,[(Tail size) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect size) -> effect*] ... ,[(Tail size) -> tail])
-           `(begin ,effect* ... ,tail)]
+           (make-begin `(,effect* ... ,tail))]
           [,x x]))))
   (define Pred
     (lambda (size)
@@ -1837,7 +1800,7 @@
           [(if ,[(Pred size) -> cond] ,[(Pred size) -> conseq] ,[(Pred size) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect size) -> effect*] ... ,[(Pred size) -> pred])
-           `(begin ,effect* ... ,pred)]
+           (make-begin `(,effect* ... ,pred))]
           [,x x]))))
   (define Effect
     (lambda (size)
@@ -1850,7 +1813,7 @@
           [(if ,[(Pred size) -> cond] ,[(Effect size) -> conseq] ,[(Effect size) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect size) -> effect*] ... ,[(Effect size) -> effect])
-           `(begin ,effect* ... ,effect)]
+           (make-begin `(,effect* ... ,effect))]
           [,x x]))))
   (lambda (p)
     (match p
@@ -2737,26 +2700,34 @@
 (define-who optimize-jumps
   (define graph #f)
   (define trace-graph
-    (lambda (graph begin)
-      (cond [(assq begin graph) =>
+    (lambda (start)
+      (cond [(assq start graph) =>
              (lambda (x)
-               (let ([dest (trace-graph graph (cdr x))])
+               (let ([dest (trace-graph (cdr x))])
                  (set-cdr! x dest)
                  dest))]
-            [else begin])))
+            [else start])))
   (define Tail
     (lambda (t)
       (match t
-        [(begin ,eff* ... ,[Tail -> tail])
+        [(begin ,[Effect -> eff*] ... ,[Tail -> tail])
          `(begin ,eff* ... ,tail)]
         [(if (,rel ,x ,y) (,c) (,a))
-         `(if (,rel ,x ,y) (,(trace-graph graph c)) (,(trace-graph graph a)))]
-        [(,triv) (list (trace-graph graph triv))])))
+         `(if (,rel ,x ,y) (,(trace-graph c)) (,(trace-graph a)))]
+        [(,triv) (list (trace-graph triv))])))
+  (define Effect
+    (lambda (e)
+      (match e
+        [(set! ,v1 (,rator ,v1 ,v2)) (guard (label? v2))
+         `(set! ,v1 (,rator ,v1 ,(trace-graph v2)))]
+        [(set! ,v1 ,v2) (guard (label? v2))
+         `(set! ,v1 ,(trace-graph v2))]
+        [,x x])))
   (define build-tail
     (lambda (label t)
       (match t
         [(,lab) (guard (label? lab))
-         (if (eq? (trace-graph graph lab) label)
+         (if (eq? (trace-graph lab) label)
              (list `(,label (lambda () ,x)))
              (begin (set! graph (cons (cons label lab) graph))
                     '()))]
@@ -2915,3 +2886,55 @@
                             (emit 'movq v2 v1))])))
   Program)
 
+(compiler-passes '(
+  parse-scheme
+  convert-primitive
+  convert-complex-datum
+  optimize-direct-call
+  uncover-assigned
+  purify-letrec
+  optimize-constant
+  optimize-useless
+  convert-assignments
+  remove-anonymous-lambda
+  sanitize-binding-forms
+  uncover-free
+  convert-closures
+  optimize-known-call
+  uncover-well-known
+  optimize-free
+  optimize-self-reference
+  analyze-closure-size
+  introduce-procedure-primitives
+  lift-letrec
+  normalize-context
+  specify-representation
+  uncover-locals
+  remove-let
+  verify-uil
+  remove-complex-opera*
+  flatten-set!
+  impose-calling-conventions
+  expose-allocation-pointer
+  uncover-frame-conflict
+  pre-assign-frame
+  assign-new-frame
+  (iterate
+    finalize-frame-locations
+    select-instructions
+    uncover-register-conflict
+    assign-registers
+    (break when everybody-home?)
+    assign-frame)
+  discard-call-live
+  finalize-locations
+  expose-frame-var
+  expose-memory-operands
+  expose-basic-blocks
+  optimize-jumps
+  flatten-program
+  analyze-code-size
+  generate-x86-64
+))
+
+(load "tests15.scm")
