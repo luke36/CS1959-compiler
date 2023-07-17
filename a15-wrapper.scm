@@ -75,7 +75,7 @@
                   (error who "result ~s is outside of fixnum range" ans))
                 ans)))
           ,x)]
-      [(uncover-assigned purify-letrec pre-optimize optimize-constant)
+      [(uncover-assigned purify-letrec pre-optimize optimize-constant optimize-useless)
        `(let ()
           (import (except scheme * + -))
           (define-who *
