@@ -1,5 +1,3 @@
-;; todo: use make-(nopless-)begin (it can really affect optimisations!)
-
 (eval-when (compile load eval)
   (optimize-level 3)
   (case-sensitive #t)
@@ -10,6 +8,11 @@
 (load "driver.scm")
 (load "fmts.pretty")
 (load "a15-wrapper.scm")
+
+(define *enable-cp-1* #t)
+(define *enable-closure-optimisation* #t)
+(define *enable-coalescing* #t)
+(define *optimize-jumps* #t)
 
 (define take
   (lambda (n lst)
@@ -47,17 +50,6 @@
     (and (integer? x)
          (exact? x)
          (not (fixnum-range? x)))))
-
-(define binop->datum
-  (lambda (op)
-    (let ([meta (match op
-                  [+ +]
-                  [- -]
-                  [* *]
-                  [logand logand]
-                  [logor logor]
-                  [sra sra])])
-      (lambda (x y) (meta x y)))))
 
 (define relops
   '(= < <= > >=))
@@ -116,10 +108,13 @@
         body
         `(let ,binding (assigned ,assign ,body)))))
 
+(define mask-symbol #b111)
+(define tag-symbol  #b100)
+
 (define value-primitives
   `(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
 (define predicate-primitives
- `(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure?))
+ `(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
 (define effect-primitives
   `(set-car! set-cdr! vector-set! procedure-set!))
 (define value-primitive?
@@ -154,6 +149,7 @@
     [pair?         . 1]
     [procedure?    . 1]
     [vector?       . 1]
+    [symbol?       . 1]
     [set-car!      . 2]
     [set-cdr!      . 2]
     [vector-set!   . 3]))
@@ -183,6 +179,7 @@
                (format-error who "integer ~s is out of bound" d))]
             [(boolean? d) (void)]
             [(null? d) (void)]
+            [(symbol? d) (void)]
             [else (format-error who "invalid datum ~s" d)])))
   (define convert-and
     (lambda (rand*)
@@ -210,7 +207,6 @@
         (match x
           [#t '(quote #t)]
           [#f '(quote #f)]
-          [() '(quote ())]
           [,n (guard (integer? x) (exact? x) (fixnum-range? x)) `(quote ,n)]
           [,var (guard (symbol? var)) ((Var env) var)]
           [(,proc ,[(Expr env) -> arg*] ...) (guard (assq proc env))
@@ -475,6 +471,7 @@
   (define complex?
     (lambda (im)
       (not (or (null? im)
+               (symbol? im)
                (integer? im)
                (boolean? im)))))
   (define merge-value
@@ -532,8 +529,10 @@
                        (values `(quote ,(car v)) v)))]
                   [else (values x '())])]))))
   (lambda (p)
-    (let-values ([(p^ v) ((Expr '()) p)])
-      p^)))
+    (if *enable-cp-1*
+        (let-values ([(p^ v) ((Expr '()) p)])
+          p^)
+        p)))
 
 (define-who optimize-useless
   (define Expr
@@ -608,8 +607,10 @@
                 (values x (list x))
                 (values '(void) '()))]))))
   (lambda (prog)
-    (let-values ([(prog^ u) ((Expr 'value) prog)])
-      prog^)))
+    (if *enable-cp-1*
+        (let-values ([(prog^ u) ((Expr 'value) prog)])
+          prog^)
+        prog)))
 
 (define-who convert-assignments
   (define Expr
@@ -813,8 +814,10 @@
         [,x (guard (uvar? x)) (values x (list x))]
         [,lab (guard (label? lab)) (values lab '())])))
   (lambda (p)
-    (let-values ([(p^ u) (Expr p)])
-      p^)))
+    (if *enable-closure-optimisation*
+        (let-values ([(p^ u) (Expr p)])
+          p^)
+        p)))
 
 (define-who optimize-free
   (define partition
@@ -880,7 +883,8 @@
              `(lambda (,fml*^ ...)
                 (bind-free (,bd* ...)
                   ,((Expr wk-uvar wk-lab) body))))]))))
-  (lambda (p) ((Expr '() '()) p)))
+  (lambda (p)
+    (if *enable-closure-optimisation* ((Expr '() '()) p) p)))
 
 (define-who optimize-self-reference
   (define Expr
@@ -919,7 +923,7 @@
            `(lambda (,cp ,fml* ...)
               (bind-free (,cp ,@(remq self fv*))
                 ,((Expr self cp) body)))]))))
-  (lambda (p) ((Expr #f #f) p)))
+  (lambda (p) (if *enable-closure-optimisation* ((Expr #f #f) p) p)))
 
 (define-who introduce-procedure-primitives
   (define index-of
@@ -1066,6 +1070,7 @@
        `(letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
 
 (define-who specify-representation
+  (define symbol->label #f)
   (define offset-car (- disp-car tag-pair))
   (define offset-cdr (- disp-cdr tag-pair))
   (define offset-vector-length (- disp-vector-length tag-vector))
@@ -1156,6 +1161,7 @@
         [(pair? ,[Value -> e]) `(= (logand ,e ,mask-pair) ,tag-pair)]
         [(procedure? ,[Value -> e]) `(= (logand ,e ,mask-procedure) ,tag-procedure)]
         [(vector? ,[Value -> e]) `(= (logand ,e ,mask-vector) ,tag-vector)]
+        [(symbol? ,[Value -> e]) `(= (logand ,e ,mask-symbol) ,tag-symbol)]
         [,x x])))
   (define Effect
     (lambda (eff)
@@ -1183,11 +1189,18 @@
       (cond [(eq? i #t) $true]
             [(eq? i #f) $false]
             [(eq? i '()) $nil]
+            [(symbol? i)
+             (cond [(assq i symbol->label) => (lambda (lab) `(logor ,(cdr lab) ,tag-symbol))]
+                   [else (let ([lab (unique-label i)])
+                           (set! symbol->label (cons (cons i lab) symbol->label))
+                           `(logor ,lab ,tag-symbol))])] ;; todo
             [else (ash i shift-fixnum)])))
   (lambda (p)
+    (set! symbol->label '())
     (match p
       [(letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+       `(let ,(map (lambda (bd) (list (cdr bd) (list 'quote (car bd)))) symbol->label)
+          (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who uncover-locals
   (define locals #f)
@@ -1245,8 +1258,8 @@
         [,x (values)])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who remove-let
   (define reorder-assign
@@ -1342,8 +1355,8 @@
         [,x (values x (if (uvar? x) (list x) '()) #f)])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define verify-uil (lambda (x) x))
 
@@ -1426,8 +1439,8 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who flatten-set!
   (define do-flatten-set!
@@ -1486,8 +1499,8 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who impose-calling-conventions
   (define new-frames #f)
@@ -1592,9 +1605,9 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body])
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body]))
        (let ([body*^ (map (lambda (p b) ((Body p) b)) uvar* body*)])
-         `(letrec ([,label* (lambda () ,body*^)] ...) ,body))])))
+         `(let ,data* (letrec ([,label* (lambda () ,body*^)] ...) ,body)))])))
 
 (define-who expose-allocation-pointer
   (define Body
@@ -1631,8 +1644,8 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define uncover-frame-conflict
   (letrec ([graph #f]
@@ -1653,8 +1666,8 @@
     (define Program
       (lambda (p)
         (match p
-          [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-           `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+          [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
     (define Body
       (lambda (b)
         (set! call-live '())
@@ -1727,8 +1740,8 @@
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Body
     (lambda (b)
       (match b
@@ -1817,15 +1830,15 @@
           [,x x]))))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
 
 (define-who finalize-frame-locations
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Body
     (lambda (b)
       (match b
@@ -2076,8 +2089,8 @@
                             [else (values e '())])])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
 
 (define uncover-register-conflict
   (letrec ([graph #f]
@@ -2106,8 +2119,8 @@
     (define Program
       (lambda (p)
         (match p
-          [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-           `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+          [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
     (define Body
       (lambda (b)
         (match b
@@ -2122,12 +2135,18 @@
                (map (lambda (x) (list x)) locs)
                (map (lambda (x) (list x)) ulocs)))
            (Tail tail)
-           `(locals ,locs
-              (ulocals ,ulocs
-                (locate ,homes
-                  (frame-conflict ,conflict
-                    (register-conflict ,graph
-                      (register-move ,move ,tail))))))])))
+           (if *enable-coalescing*
+               `(locals ,locs
+                  (ulocals ,ulocs
+                    (locate ,homes
+                      (frame-conflict ,conflict
+                        (register-conflict ,graph
+                          (register-move ,move ,tail))))))
+               `(locals ,locs
+                  (ulocals ,ulocs
+                    (locate ,homes
+                      (frame-conflict ,conflict
+                        (register-conflict ,graph ,tail))))))])))
     (define Tail
       (letrec ([make-liveset
                  (lambda (loc)
@@ -2173,7 +2192,7 @@
             [(set! ,v ,x)
              (let ([post-rhs (difference post (list v))])
                (add-conflict-list v (difference post-rhs (list x)))
-               (add-move v x)
+               (if *enable-coalescing* (add-move v x))
                (liveset-cons x post-rhs))]))))
     (define Effect*
       (lambda (post)
@@ -2182,7 +2201,7 @@
                 [else ((Effect ((Effect* post) (cdr e*))) (car e*))]))))
     Program))
 
-(define-who assign-registers
+(define-who assign-registers-coalesce
   (define K (length registers))
   (define ulocals #f)
   (define remq*
@@ -2346,8 +2365,77 @@
                           (frame-conflict ,frame-conflict ,tail)))))))]))))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+
+(define-who assign-registers-vanilla
+  (define Program
+    (lambda (p)
+      (match p
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+  (define Body
+    (letrec ([low-degree? (lambda (e) (< (length (cdr e)) (length registers)))]
+             [select (lambda (conflict ok?)
+                       (let loop ([before '()] [after conflict])
+                         (if (null? after) #f
+                             (let ([now (car after)])
+                               (if (ok? now)
+                                   (cons now
+                                     (append (reverse before) (cdr after)))
+                                   (loop (cons now before) (cdr after)))))))]
+             [color (lambda (ulocs graph)
+                      (if (null? graph) '()
+                          (let* ([entry-rest
+                                   (or (select graph low-degree?)
+                                       (select graph (lambda (x) (not (memq x ulocs))))
+                                       (format-error who
+                                         "no candidate for register assignment in ~s" graph))]
+                                 [entry (car entry-rest)]
+                                 [rest (cdr entry-rest)])
+                            (let* ([graph^ (map (lambda (e)
+                                                  (cons (car e)
+                                                    (difference (cdr e) (list (car entry))))) rest)]
+                                   [assign (color ulocs graph^)]
+                                   [conflict (cdr entry)]
+                                   [now (car entry)]
+                                   [conflict^
+                                     (let replace ([conflict conflict])
+                                       (cond [(null? conflict) '()]
+                                             [(register? (car conflict))
+                                              (cons (car conflict) (replace (cdr conflict)))]
+                                             [(assq (car conflict) assign) =>
+                                              (lambda (x) (cons (cadr x) (replace (cdr conflict))))]
+                                             [else (replace (cdr conflict))]))]
+                                   [available (difference registers conflict^)])
+                              (if (null? available)
+                                  assign
+                                  (cons (cons now (cons (car available) '())) assign))))))])
+      (lambda (b)
+        (match b
+          [(locate ,homes ,tail) b]
+          [(locals ,locs
+             (ulocals ,ulocs
+               (locate ,homes
+                 (frame-conflict ,frame-conflict
+                   (register-conflict ,register-conflict ,tail)))))
+           (let* ([assign (color ulocs register-conflict)]
+                  [assigned (map car assign)]
+                  [spill (difference (append locs ulocs) assigned)])
+             (if (null? spill)
+                 `(locate ,(append assign homes) ,tail)
+                 `(locals ,(difference locs spill)
+                    (ulocals ,ulocs
+                      (spills ,(difference spill ulocs)
+                        (locate ,homes
+                          (frame-conflict ,frame-conflict ,tail)))))))]))))
+  Program)
+
+(define assign-registers
+  (lambda (p)
+    (if *enable-coalescing*
+        (assign-registers-coalesce p)
+        (assign-registers-vanilla p))))
 
 (define-who everybody-home?
   (define all-home?
@@ -2362,7 +2450,7 @@
         [,x (error who "invalid Body ~s" x)])))
   (lambda (x)
     (match x
-      [(letrec ([,label* (lambda () ,body*)] ...) ,body)
+      [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
        (andmap all-home? `(,body ,body* ...))]
       [,x (error who "invalid Program ~s" x)])))
 
@@ -2370,8 +2458,8 @@
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Body
     (lambda (b)
       (match b
@@ -2408,8 +2496,8 @@
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Body
     (lambda (b)
       (match b
@@ -2443,8 +2531,8 @@
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Body
     (lambda (b)
       (match b
@@ -2499,8 +2587,8 @@
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[(Tail 0) -> body*])] ...) ,[(Tail 0) -> body])
-         `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,[(Tail 0) -> body*])] ...) ,[(Tail 0) -> body]))
+         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
   (define Tail
     (lambda (offset)
       (lambda (t)
@@ -2613,21 +2701,22 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body])
-       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+      [(let ,data* (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))
+       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
 
 (define-who expose-basic-blocks
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block])
+        [(let ,data*
+           (letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block]))
          (letrec ([pair (lambda (headers others)
                           (if (null? headers) '()
                               (append
                                 (cons (car headers) (car others))
                                 (pair (cdr headers) (cdr others)))))])
            (let ([blocks (pair `([,label* (lambda () ,body*)] ...) block*)])
-             `(letrec ,(append block blocks) ,body)))])))
+             `(let ,data* (letrec ,(append block blocks) ,body))))])))
   (define Tail
     (lambda (t)
       (match t
@@ -2736,18 +2825,20 @@
     (lambda (p)
       (set! graph '())
       (match p
-        [(letrec ([,label* (lambda () ,body*)] ...) ,body)
-         `(letrec ,(apply append (map build-tail label* body*)) ,body)])))
+        [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
+         `(let ,data* (letrec ,(apply append (map build-tail label* body*)) ,body))])))
   (lambda (p)
-    (match (build p)
-      [(letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body])
-       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+    (if *enable-optimize-jumps*
+        (match (build p)
+          [(let ,data* (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))
+           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])
+        p)))
 
 (define-who flatten-program
   (define Program
     (lambda (p)
       (match p
-        [(letrec ([,label* (lambda () ,body*)] ...) ,body)
+        [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
          (letrec ([cat (lambda (label body)
                          (cond [(null? label) '()]
                                [else
@@ -2756,7 +2847,9 @@
                                      (append ((Tail next) (car body))
                                        (cat (cdr label) (cdr body)))))]))])
            (let ([next (if (null? label*) #f (car label*))])
-             (cons 'code (append ((Tail next) body) (cat label* body*)))))])))
+             (list
+               (cons 'data data*)
+               (cons 'code (append ((Tail next) body) (cat label* body*))))))])))
   (define Tail
     (lambda (next)
       (lambda (t)
@@ -2828,7 +2921,8 @@
     (define analyze
       (lambda (x)
         (match x
-          [(code ,[ins*] ...)
+          [((data ,data* ...)
+            (code ,[ins*] ...))
            (printf "code size: ~a\n" (apply + ins*))
            (set! *all-code-size* (cons (apply + ins*) *all-code-size*))
            x]
@@ -2839,10 +2933,22 @@
 
 (define test-all-analyze
   (lambda ()
+    (define bool->word
+      (lambda (x)
+        (if x "Yes" "No")))
     (fluid-let ([*enable-analyze* #t]
                 [*all-closures* '()]
                 [*all-code-size* '()])
       (test-all #f)
+      (printf "\n** Options **
+        iterated register coalescing:     ~a
+        closure optimization:             ~a
+        pre-optimization:                 ~a
+        optimize jumps:                   ~a\n\n"
+              (bool->word *enable-coalescing*)
+              (bool->word *enable-closure-optimisation*)
+              (bool->word *enable-cp-1*)
+              (bool->word *enable-optimize-jumps*))
       (printf "** closure analysis report **
        total closures created:  ~a
        total free var:          ~a
@@ -2858,16 +2964,32 @@
               (exact->inexact (/ (apply + *all-code-size*)
                                  (length *all-code-size*)))))))
 
+(define emit-static-data
+  (lambda (data*)
+    (emit '.text)
+    (emit '.section ".rodata")
+    (for-each
+      (lambda (data)
+        (match data
+          [(,lab (quote ,sym))
+           (emit-label lab)
+           (emit '.string (format "~s" (symbol->string sym)))
+           (emit '.align "8")]))
+      data*)))
+
 (define-who generate-x86-64
   (define Program
     (lambda (p)
       (match p
-        [(code ,stmt* ...)
-         (letrec ([emit (lambda (s)
-                          (unless (null? s)
-                            (Statement (car s))
-                            (emit (cdr s))))])
-           (emit-program (emit stmt*)))])))
+        [((data ,data* ...)
+          (code ,stmt* ...))
+         (letrec ([emit* (lambda (s)
+                           (unless (null? s)
+                             (Statement (car s))
+                             (emit* (cdr s))))])
+           (emit-static-data data*)
+           (emit '.text)
+           (emit-program (emit* stmt*)))])))
   (define Statement
     (lambda (s)
       (match s
@@ -2938,3 +3060,4 @@
 ))
 
 (load "tests15.scm")
+(trusted-passes #t)
