@@ -586,7 +586,7 @@
 ;;; extract-suffix returns the numeric portion of the unique suffix
 ;;; of a unique name or label.  It returns #f if passed something other
 ;;; than a unique name or label.
-(module (unique-name unique-name-count extract-suffix unique-label unique-delayed-frame-var)
+(module (unique-name unique-name-count extract-suffix unique-label)
   (define count 0)
   (define unique-suffix
     (lambda ()
@@ -633,13 +633,7 @@
           (extract-root sym)
           "$"
           (let ([suffix (or (extract-suffix sym) (unique-suffix))])
-            (substring suffix 0 (string-length suffix)))))))
-  (define unique-delayed-frame-var
-    (lambda ()
-      (let ([dfv (string->symbol
-                   (string-append "dfv" (unique-suffix)))])
-        (putprop dfv 'frame-index 'delay)
-        dfv))))
+            (substring suffix 0 (string-length suffix))))))))
 
 (define label->x86-64-label
   (lambda (lab)
