@@ -205,6 +205,8 @@ static void usage_error(char *who) {
 #define disp_procedure_data 8
 #define mask_boolean 247
 #define tag_boolean 6
+#define mask_symbol 7
+#define tag_symbol 4
 #define _false 6
 #define _true 14
 #define _nil 22
@@ -281,6 +283,8 @@ static void print1(ptr x, int d) {
     printf("()");
   } else if (x == _void) {
     printf("#<void>");
+  } else if (TAG(x, mask_symbol) == tag_symbol) {
+    printf("%s", (char *)UNTAG(x, tag_symbol));
   }
 }
 
