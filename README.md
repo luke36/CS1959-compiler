@@ -1,5 +1,7 @@
-Works with Chez Scheme 9.5. Framework is modified to work with chez 9.
+Works with Chez Scheme 9.5. Framework is modified to work with chez 9 and r6rs.
+
 Beats yscheme in code length (but slower due to improper implementation of iterated register coalescing).
+
 Comparison:
 
 ``` text
@@ -16,26 +18,32 @@ Comparison:
        average free var:        0.9864864864864865
 
 ** code length report **
-       total code length:    6183
-       average code length:  37.701219512195124
+       total code length:    6153
+       average code length:  37.51829268292683
 (time (test-all-analyze))
-    1084 collections
-    6.566406531s elapsed cpu time, including 0.663341791s collecting
-    6.570452345s elapsed real time, including 0.666345217s collecting
-    9122336624 bytes allocated, including 9120089792 bytes reclaimed
+    134 collections
+    0.246573714s elapsed cpu time, including 0.009755400s collecting
+    0.253762244s elapsed real time, including 0.010013157s collecting
+    1126273056 bytes allocated, including 1128266720 bytes reclaimed
 
 ;; mine
+** Options **
+        iterated register coalescing:     Yes
+        closure optimization:             Yes
+        pre-optimization:                 Yes
+        optimize jumps:                   Yes
+
 ** closure analysis report **
        total closures created:  71
        total free var:          74
        average free var:        1.0422535211267605
 
 ** code length report **
-       total code length:    5862
-       average code length:  35.74390243902439
+       total code length:    5837
+       average code length:  35.59146341463415
 (time (test-all-analyze))
-    1321 collections
-    8.371718957s elapsed cpu time, including 0.824038186s collecting
-    8.376826559s elapsed real time, including 0.827704188s collecting
-    11112810752 bytes allocated, including 11114388528 bytes reclaimed
+    61 collections
+    0.155646014s elapsed cpu time, including 0.005947933s collecting
+    0.225316195s elapsed real time, including 0.006085444s collecting
+    510043376 bytes allocated, including 514482704 bytes reclaimed
 ```
