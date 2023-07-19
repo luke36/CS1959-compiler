@@ -1,5 +1,5 @@
 (eval-when (compile load eval)
-  (optimize-level 3)
+  (optimize-level 2)
   (case-sensitive #t)
 )
 
@@ -12,7 +12,23 @@
 (define *enable-cp-1* #t)
 (define *enable-closure-optimisation* #t)
 (define *enable-coalescing* #t)
-(define *optimize-jumps* #t)
+(define *enable-optimize-jumps* #t)
+
+(define mask-symbol #b111)
+(define tag-symbol  #b100)
+
+(define emit-static-data
+  (lambda (data*)
+    (emit '.text)
+    (emit '.section ".rodata")
+    (for-each
+      (lambda (data)
+        (match data
+          [(,lab (quote ,sym))
+           (emit-label lab)
+           (emit '.string (format "~s" (symbol->string sym)))
+           (emit '.align "8")]))
+      data*)))
 
 (define take
   (lambda (n lst)
@@ -102,14 +118,11 @@
         body
         `(letrec ,binding ,body))))
 
-(define make-let-assign
+(define make-let-assigned
   (lambda (binding assign body)
     (if (null? binding)
         body
         `(let ,binding (assigned ,assign ,body)))))
-
-(define mask-symbol #b111)
-(define tag-symbol  #b100)
 
 (define value-primitives
   `(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
@@ -430,8 +443,8 @@
                             (assigned ()
                               (begin (set! ,c-x* ,tmp*) ...)))
                           ,body)))])
-           (make-let-assign simple* '()
-             (make-let-assign `([,c-x* (void)] ...)
+           (make-let-assigned simple* '()
+             (make-let-assigned `([,c-x* (void)] ...)
                c-x*
                (make-letrec lambda*
                  innermost)))))]
@@ -555,7 +568,7 @@
                 (values
                   (make-begin
                     `(,@effect*
-                       ,(make-let-assign `([,x* ,expr*] ...)
+                       ,(make-let-assigned `([,x* ,expr*] ...)
                           (intersection x* as*) body)))
                   (difference (union u (apply union u1*) (apply union u2*)) x*))]))]
           [(letrec ([,x* ,[(Expr 'value) -> expr* u*]] ...) ,[body u])
@@ -1190,10 +1203,10 @@
             [(eq? i #f) $false]
             [(eq? i '()) $nil]
             [(symbol? i)
-             (cond [(assq i symbol->label) => (lambda (lab) `(logor ,(cdr lab) ,tag-symbol))]
+             (cond [(assq i symbol->label) => (lambda (lab) `(+ ,(cdr lab) ,tag-symbol))]
                    [else (let ([lab (unique-label i)])
                            (set! symbol->label (cons (cons i lab) symbol->label))
-                           `(logor ,lab ,tag-symbol))])] ;; todo
+                           `(+ ,lab ,tag-symbol))])] ;; todo
             [else (ash i shift-fixnum)])))
   (lambda (p)
     (set! symbol->label '())
@@ -2309,7 +2322,8 @@
   (define freeze
     (lambda (conf mov)
       (cond
-        [(select-entry mov (lambda (e) (< (length (cdr (assq (car e) conf))) K)))
+        [(select-entry mov (lambda (e) (and (not (null? (cdr e)))
+                                            (< (length (cdr (assq (car e) conf))) K))))
          => (lambda (entry-rest)
               (let* ([entry (car entry-rest)]
                      [uvar (car entry)]
@@ -2330,7 +2344,11 @@
                      [uvar-conf0 (cdr entry)]
                      [rest (cdr entry-rest)]
                      [conf^ (remq* uvar rest)]
-                     [assignment0 (simplify conf^ mov)]
+                     [mov^0 (filter
+                              (lambda (e) (not (eq? uvar (car e))))
+                              mov)]
+                     [mov^ (remq* uvar mov^0)]
+                     [assignment0 (simplify conf^ mov^)]
                      [uvar-conf (map (lambda (x) (follow x assignment0)) uvar-conf0)]
                      [available (difference registers uvar-conf)])
                 (if (null? available)
@@ -2941,10 +2959,10 @@
                 [*all-code-size* '()])
       (test-all #f)
       (printf "\n** Options **
-        iterated register coalescing:     ~a
-        closure optimization:             ~a
-        pre-optimization:                 ~a
-        optimize jumps:                   ~a\n\n"
+        iterated register coalescing:  ~a
+        closure optimization:          ~a
+        pre-optimization:              ~a
+        optimize jumps:                ~a\n\n"
               (bool->word *enable-coalescing*)
               (bool->word *enable-closure-optimisation*)
               (bool->word *enable-cp-1*)
@@ -2963,19 +2981,6 @@
               (apply + *all-code-size*)
               (exact->inexact (/ (apply + *all-code-size*)
                                  (length *all-code-size*)))))))
-
-(define emit-static-data
-  (lambda (data*)
-    (emit '.text)
-    (emit '.section ".rodata")
-    (for-each
-      (lambda (data)
-        (match data
-          [(,lab (quote ,sym))
-           (emit-label lab)
-           (emit '.string (format "~s" (symbol->string sym)))
-           (emit '.align "8")]))
-      data*)))
 
 (define-who generate-x86-64
   (define Program
@@ -3060,4 +3065,5 @@
 ))
 
 (load "tests15.scm")
+
 (trusted-passes #t)

@@ -1,3 +1,7 @@
+;; every (valid) pass runs multiple times, by the interpreter and your
+;; compiler. so make sure each time they yield same results when adding your own
+;; tests (especially set-car! and set-cdr!).
+
 (define invalid-tests
   '(#(a b c)
     5.5
@@ -117,7 +121,7 @@
     (let ([x 5]) (+ x y))
     (let ([f (lambda (x) (if (= x 0) 1 (* x (f (- x 1)))))])
       (f 10))
-  ))
+    ))
 
 (define tests
   '(7
