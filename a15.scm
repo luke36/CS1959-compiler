@@ -9,26 +9,182 @@
 (load "fmts.pretty")
 (load "a15-wrapper.scm")
 
-(define *enable-cp-1* #t)
-(define *enable-closure-optimisation* #t)
-(define *enable-coalescing* #t)
-(define *enable-optimize-jumps* #t)
+(define *cp-1-enabled* #t)
+(define *closure-optimization-enabled* #t)
+(define *iterated-coalescing-enabled* #t)
+(define *optimize-jumps-enabled* #t)
+(define *max-inline-literal-size* #f)
+
+(define decode-literal-label)
 
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
 
-(define emit-static-data
+(define flag-true $true)
+(define flag-false $false)
+(define flag-nil $nil)
+(define flag-trivial 1)
+(define flag-pair 2)
+(define flag-vector 3)
+(define flag-vector-end 4)
+(define flag-empty-vector 5)
+
+(define-who emit-static-data
+  (define hex '#("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "A" "B" "C" "D" "E" "F"))
+  (define int8->c-escape
+    (lambda (int8)
+      (printf "\\x")
+      (printf (vector-ref hex (div int8 16)))
+      (printf (vector-ref hex (mod int8 16)))))
+  (define ptr->c-escape
+    (lambda (ptr)
+      (let loop ([c 8] [x ptr])
+        (unless (zero? c)
+          (int8->c-escape (mod x 255))
+          (loop (- c 1) (div x 256))))))
+  (define char->c-escape
+    (lambda (ch) (int8->c-escape (char->integer ch))))
+  (define encode
+    (lambda (lit)
+      (cond [(pair? lit)
+             (int8->c-escape flag-pair)
+             (encode (car lit))
+             (encode (cdr lit))]
+            [(and (vector? lit) (zero? (vector-length lit)))
+             (int8->c-escape flag-empty-vector)]
+            [(vector? lit)
+             (int8->c-escape flag-vector)
+             (ptr->c-escape (ash (vector-length lit) shift-fixnum))
+             (vector-for-each encode lit)
+             (int8->c-escape flag-vector-end)]
+            [(eq? lit $true) (int8->c-escape flag-true)]
+            [(eq? lit $false) (int8->c-escape flag-false)]
+            [(eq? lit $nil)  (int8->c-escape flag-nil)]
+            [else
+              (int8->c-escape flag-trivial)
+              (ptr->c-escape lit)])))
   (lambda (data*)
+    (letrec ([emit-one
+               (lambda (data)
+                 (match data
+                   [(symbol-dump ((quote ,sym*) ...))
+                    (emit-label "_symbol_dump")
+                    (printf "    .ascii")
+                    (printf " \"")
+                    (for-each
+                      (lambda (sym)
+                        (string-for-each char->c-escape (symbol->string sym))
+                        (char->c-escape #\x00))
+                      sym*)
+                    (printf "\"\n")]
+                   [(,lab (encode-literal (quote ,complex)))
+                    (emit-label lab)
+                    (printf "    .ascii")
+                    (printf " \"")
+                    (encode complex)
+                    (printf "\"\n")]))])
+      (emit '.text)
+      (emit '.section ".data")
+      (for-each emit-one data*))))
+
+(define emit-helper
+  (lambda ()
     (emit '.text)
-    (emit '.section ".rodata")
-    (for-each
-      (lambda (data)
-        (match data
-          [(,lab (quote ,sym))
-           (emit-label lab)
-           (emit '.string (format "~s" (symbol->string sym)))
-           (emit '.align "8")]))
-      data*)))
+    (emit '.global "_symbol2address")
+    (emit-label "_symbol2address")
+    (emit 'sarq shift-fixnum 'rdi)
+    (emit 'leaq "_symbol_dump(%rip)" 'rax)
+    (emit 'addq 'rdi 'rax)
+    (emit 'ret)
+    (emit-label decode-literal-label)
+    (printf
+"    movq $-2, %rax
+    movq %r8, %r9
+loop_entry:
+    movzbq 0(%r8), %rcx
+    addq $1, %r8
+    cmpq $2, %rcx
+    je case_pair
+    cmpq $1, %rcx
+    je case_trivial
+    cmpq $3, %rcx
+    je case_vector
+    cmpq $5, %rcx
+    je case_empty_vector
+default:
+    movq %rcx, %rsi
+    jmp go_up
+case_pair:
+    movq %rdx, %rsi
+    addq $16, %rdx
+    addq $1, %rsi
+    movq $-2, -1(%rsi)
+    movq %rax, 7(%rsi)
+    movq %rsi, %rax
+    jmp loop_entry
+case_trivial:
+    movq 0(%r8), %rsi
+    addq $8, %r8
+    jmp go_up
+case_vector:
+    movq 0(%r8), %rdi
+    addq $8, %r8
+    movq %rdx, %rsi
+    addq %rdi, %rdx
+    addq $8, %rdx
+    addq $3, %rsi
+    movq $0, -3(%rsi)
+    movq %rax, -3(%rsi, %rdi)
+    movq %rsi, %rax
+    jmp loop_entry
+case_empty_vector:
+    movq %rdx, %rsi
+    addq $8, %rdx
+    addq $3, %rsi
+    movq $0, -3(%rsi)
+    cmpq $-2, %rax
+    jne go_up
+    movq %rsi, %rax
+    jmp *%r15
+go_up:
+    movq %rax, %r10
+    andq $7, %r10
+    cmpq $1, %r10
+    jne pa_is_vector
+pa_is_pair:
+    cmpq $-2, -1(%rax)
+    jne is_cdr
+is_car:
+    movq %rsi, -1(%rax)
+    jmp loop_entry
+is_cdr:
+    movq 7(%rax), %rbx
+    movq %rsi, 7(%rax)
+    jmp return_or_up
+pa_is_vector:
+    cmpb $4, 0(%r8)
+    je is_last_element
+not_last_element:
+    movq -3(%rax), %r10
+    movq %rsi, 5(%rax, %r10)
+    addq $8, -3(%rax)
+    jmp loop_entry
+is_last_element:
+    addq $1, %r8
+    movq -3(%rax), %r10
+    movq 5(%rax, %r10), %rbx
+    movq %rsi, 5(%rax, %r10)
+    addq $8, -3(%rax)
+return_or_up:
+    cmpq $-2, %rbx
+    je return
+    movq %rax, %rsi
+    movq %rbx, %rax
+    jmp go_up
+return:
+    movq %rax, 0(%r9)
+    jmp *%r15
+")))
 
 (define take
   (lambda (n lst)
@@ -300,6 +456,11 @@
       (make-letrec (map cdr bindings) p^))))
 
 (define-who convert-complex-datum
+  (define size
+    (lambda (d)
+      (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
+            [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
+            [else 1])))
   (define bindings #f)
   (define fillings #f)
   (define do-conversion
@@ -336,16 +497,18 @@
         [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
         [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
         [(quote ,imm)
-         (let ([imm^ (do-conversion imm)])
-           (cond [(and (pair? imm) (not (null? imm)))
-                  (let ([tmp (unique-name 'tmp)])
-                    (set! bindings (cons `(,tmp ,imm^) bindings))
-                    tmp)]
-                 [(vector? imm)
-                  (set! bindings (cons (caadr imm^) bindings))
-                  (set! fillings (append (remove-last (cdaddr imm^)) fillings))
-                  (caaadr imm^)]
-                 [else `(quote ,imm)]))]
+         (if (and (or (pair? imm) (vector? imm))
+                  (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
+             (let ([imm^ (do-conversion imm)])
+               (cond [(and (pair? imm) (not (null? imm)))
+                      (let ([tmp (unique-name 'tmp)])
+                        (set! bindings (cons `(,tmp ,imm^) bindings))
+                        tmp)]
+                     [(vector? imm)
+                      (set! bindings (cons (caadr imm^) bindings))
+                      (set! fillings (append (remove-last (cdaddr imm^)) fillings))
+                      (caaadr imm^)]))
+             `(quote ,imm))]
         [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
         [,x (guard (uvar? x)) x])))
   (lambda (p)
@@ -542,7 +705,7 @@
                        (values `(quote ,(car v)) v)))]
                   [else (values x '())])]))))
   (lambda (p)
-    (if *enable-cp-1*
+    (if *cp-1-enabled*
         (let-values ([(p^ v) ((Expr '()) p)])
           p^)
         p)))
@@ -620,7 +783,7 @@
                 (values x (list x))
                 (values '(void) '()))]))))
   (lambda (prog)
-    (if *enable-cp-1*
+    (if *cp-1-enabled*
         (let-values ([(prog^ u) ((Expr 'value) prog)])
           prog^)
         prog)))
@@ -827,7 +990,7 @@
         [,x (guard (uvar? x)) (values x (list x))]
         [,lab (guard (label? lab)) (values lab '())])))
   (lambda (p)
-    (if *enable-closure-optimisation*
+    (if *closure-optimization-enabled*
         (let-values ([(p^ u) (Expr p)])
           p^)
         p)))
@@ -897,7 +1060,7 @@
                 (bind-free (,bd* ...)
                   ,((Expr wk-uvar wk-lab) body))))]))))
   (lambda (p)
-    (if *enable-closure-optimisation* ((Expr '() '()) p) p)))
+    (if *closure-optimization-enabled* ((Expr '() '()) p) p)))
 
 (define-who optimize-self-reference
   (define Expr
@@ -936,7 +1099,7 @@
            `(lambda (,cp ,fml* ...)
               (bind-free (,cp ,@(remq self fv*))
                 ,((Expr self cp) body)))]))))
-  (lambda (p) (if *enable-closure-optimisation* ((Expr #f #f) p) p)))
+  (lambda (p) (if *closure-optimization-enabled* ((Expr #f #f) p) p)))
 
 (define-who introduce-procedure-primitives
   (define index-of
@@ -1083,7 +1246,17 @@
        `(letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
 
 (define-who specify-representation
-  (define symbol->label #f)
+  (define specify-complex
+    (lambda (?complex)
+      (cond [(pair? ?complex)
+             (cons (specify-complex (car ?complex))
+               (specify-complex (cdr ?complex)))]
+            [(vector? ?complex)
+             (vector-map specify-complex ?complex)]
+            [else (Immediate ?complex)])))
+  (define current-length #f)
+  (define symbol->index #f)
+  (define label-complex* #f)
   (define offset-car (- disp-car tag-pair))
   (define offset-cdr (- disp-cdr tag-pair))
   (define offset-vector-length (- disp-vector-length tag-vector))
@@ -1122,10 +1295,10 @@
          (let* ([tmp-car (unique-name 'tmp)]
                 [tmp-cdr (unique-name 'tmp)]
                 [tmp (unique-name 'tmp)]
-                [e1^ (if (or (integer? e1) (uvar? e1)) e1 tmp-car)]
-                [e2^ (if (or (integer? e2) (uvar? e2)) e2 tmp-cdr)]
-                [bd1 (if (or (integer? e1) (uvar? e1)) '() `([,tmp-car ,e1]))]
-                [bd2 (if (or (integer? e2) (uvar? e2)) '() `([,tmp-cdr ,e2]))])
+                [e1^ (if (or (integer? e1) (uvar? e1) (eq? (car e1) 'logor)) e1 tmp-car)] ;; too hack
+                [e2^ (if (or (integer? e2) (uvar? e2) (eq? (car e2) 'logor)) e2 tmp-cdr)]
+                [bd1 (if (or (integer? e1) (uvar? e1) (eq? (car e1) 'logor)) '() `([,tmp-car ,e1]))]
+                [bd2 (if (or (integer? e2) (uvar? e2) (eq? (car e2) 'logor)) '() `([,tmp-cdr ,e2]))])
            (make-let `(,@bd1 ,@bd2)
              `(let ([,tmp (+ (alloc ,size-pair) ,tag-pair)])
                 (begin (mset! ,tmp ,offset-car ,e1^)
@@ -1203,17 +1376,35 @@
             [(eq? i #f) $false]
             [(eq? i '()) $nil]
             [(symbol? i)
-             (cond [(assq i symbol->label) => (lambda (lab) `(+ ,(cdr lab) ,tag-symbol))]
-                   [else (let ([lab (unique-label i)])
-                           (set! symbol->label (cons (cons i lab) symbol->label))
-                           `(+ ,lab ,tag-symbol))])] ;; todo
-            [else (ash i shift-fixnum)])))
+             (cond [(assq i symbol->index) =>
+                    (lambda (index) (+ tag-symbol (ash (cdr index) shift-fixnum)))]
+                   [else (let ([index current-length])
+                           (set! symbol->index (cons (cons i index) symbol->index))
+                           (set! current-length
+                             (+ current-length (add1 (string-length (symbol->string i)))))
+                           (+ tag-symbol (ash index shift-fixnum)))])]
+            [(integer? i) (ash i shift-fixnum)]
+            [else
+              (let ([lab (unique-label 'complex)])
+                (set! label-complex* (cons (list lab (specify-complex i))
+                                          label-complex*))
+                `(mref ,lab 0))])))
   (lambda (p)
-    (set! symbol->label '())
+    (set! current-length 0)
+    (set! symbol->index '())
+    (set! label-complex* '())
     (match p
       [(letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body])
-       `(let ,(map (lambda (bd) (list (cdr bd) (list 'quote (car bd)))) symbol->label)
-          (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+       (match label-complex*
+         [([,lab* ,complex*] ...)
+          (set! decode-literal-label (unique-label 'decode-literal))
+          (let ([l* (map (lambda (v) decode-literal-label) lab*)])
+            `(let ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
+                                   (reverse symbol->index))]
+                   [,lab* (encode-literal (quote ,complex*))] ...)
+               (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
+                 (begin (,l* ,lab*) ...
+                   ,body))))])])))
 
 (define-who uncover-locals
   (define locals #f)
@@ -2148,7 +2339,7 @@
                (map (lambda (x) (list x)) locs)
                (map (lambda (x) (list x)) ulocs)))
            (Tail tail)
-           (if *enable-coalescing*
+           (if *iterated-coalescing-enabled*
                `(locals ,locs
                   (ulocals ,ulocs
                     (locate ,homes
@@ -2205,7 +2396,7 @@
             [(set! ,v ,x)
              (let ([post-rhs (difference post (list v))])
                (add-conflict-list v (difference post-rhs (list x)))
-               (if *enable-coalescing* (add-move v x))
+               (if *iterated-coalescing-enabled* (add-move v x))
                (liveset-cons x post-rhs))]))))
     (define Effect*
       (lambda (post)
@@ -2451,7 +2642,7 @@
 
 (define assign-registers
   (lambda (p)
-    (if *enable-coalescing*
+    (if *iterated-coalescing-enabled*
         (assign-registers-coalesce p)
         (assign-registers-vanilla p))))
 
@@ -2846,7 +3037,7 @@
         [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
          `(let ,data* (letrec ,(apply append (map build-tail label* body*)) ,body))])))
   (lambda (p)
-    (if *enable-optimize-jumps*
+    (if *optimize-jumps-enabled*
         (match (build p)
           [(let ,data* (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))
            `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])
@@ -2959,14 +3150,16 @@
                 [*all-code-size* '()])
       (test-all #f)
       (printf "\n** Options **
+        encode large literal:          ~a
         iterated register coalescing:  ~a
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
-              (bool->word *enable-coalescing*)
-              (bool->word *enable-closure-optimisation*)
-              (bool->word *enable-cp-1*)
-              (bool->word *enable-optimize-jumps*))
+              (if (not *max-inline-literal-size*) "No" *max-inline-literal-size*)
+              (bool->word *iterated-coalescing-enabled*)
+              (bool->word *closure-optimization-enabled*)
+              (bool->word *cp-1-enabled*)
+              (bool->word *optimize-jumps-enabled*))
       (printf "** closure analysis report **
        total closures created:  ~a
        total free var:          ~a
@@ -2994,7 +3187,8 @@
                              (emit* (cdr s))))])
            (emit-static-data data*)
            (emit '.text)
-           (emit-program (emit* stmt*)))])))
+           (emit-program (emit* stmt*))
+           (emit-helper))])))
   (define Statement
     (lambda (s)
       (match s
@@ -3016,13 +3210,13 @@
 (compiler-passes '(
   parse-scheme
   convert-primitive
-  convert-complex-datum
   optimize-direct-call
   uncover-assigned
   purify-letrec
   optimize-constant
   optimize-useless
   convert-assignments
+  convert-complex-datum
   remove-anonymous-lambda
   sanitize-binding-forms
   uncover-free
