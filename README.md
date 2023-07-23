@@ -28,10 +28,11 @@ Comparison:
 
 ;; mine
 ** Options **
-        iterated register coalescing:     Yes
-        closure optimization:             Yes
-        pre-optimization:                 Yes
-        optimize jumps:                   Yes
+        encode large literal:          No
+        iterated register coalescing:  Yes
+        closure optimization:          Yes
+        pre-optimization:              Yes
+        optimize jumps:                Yes
 
 ** closure analysis report **
        total closures created:  71
@@ -39,11 +40,11 @@ Comparison:
        average free var:        1.0422535211267605
 
 ** code length report **
-       total code length:    5837
-       average code length:  35.59146341463415
+       total code length:    5763
+       average code length:  35.140243902439025
 (time (test-all-analyze))
     61 collections
-    0.155646014s elapsed cpu time, including 0.005947933s collecting
-    0.225316195s elapsed real time, including 0.006085444s collecting
-    510043376 bytes allocated, including 514482704 bytes reclaimed
+    0.172154767s elapsed cpu time, including 0.008236246s collecting
+    0.172212629s elapsed real time, including 0.008357616s collecting
+    506241488 bytes allocated, including 512865648 bytes reclaimed
 ```
