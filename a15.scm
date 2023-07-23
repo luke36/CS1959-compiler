@@ -13,7 +13,7 @@
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
-(define *max-inline-literal-size* 0)
+(define *max-inline-literal-size* #f)
 
 (define decode-literal-label)
 
@@ -83,13 +83,12 @@
                     (printf " \"")
                     (encode complex)
                     (printf "\"\n")]))])
-      (emit '.text)
-      (emit '.section ".data")
+      (emit '.data)
+      ;; (emit '.section ".data")
       (for-each emit-one data*))))
 
 (define emit-helper
   (lambda ()
-    (emit '.text)
     (emit '.global "_symbol2address")
     (emit-label "_symbol2address")
     (emit 'sarq shift-fixnum 'rdi)
@@ -525,14 +524,14 @@ return:
         [(if ,[Expr -> cond a1] ,[Expr -> conseq a2] ,[Expr -> alter a3])
          (values `(if ,cond ,conseq ,alter) (union a1 a2 a3))]
         [(begin ,[Expr -> expr* a*] ... ,[Expr -> expr a])
-         (values `(begin ,expr* ... ,expr) (union a (apply union a*)))]
+         (values `(begin ,expr* ... ,expr) (apply union a a*))]
         [(let ([,uvar* ,[Expr -> body* a*]] ...) ,[Expr -> body a])
          (values
            `(let ([,uvar* ,body*] ...)
               (assigned ,(intersection a uvar*) ,body))
            (union (difference a uvar*) (apply union a*)))]
         [(letrec ([,uvar* ,[Expr -> body* a*]] ...) ,[Expr -> body a])
-         (let ([a^ (union a (apply union a*))])
+         (let ([a^ (apply union a a*)])
            (values
              `(letrec ([,uvar* ,body*] ...)
                 (assigned ,(intersection a^ uvar*) ,body))
@@ -548,7 +547,7 @@ return:
          (values `(,prim ,rand* ...) (apply union a*))]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc a] ,[Expr -> arg* a*] ...)
-         (values `(,proc ,arg* ...) (union a (apply union a*)))]
+         (values `(,proc ,arg* ...) (apply union a a*))]
         [,x (guard (uvar? x)) (values x '())])))
   (lambda (p)
     (let-values ([(p^ a) (Expr p)])
@@ -720,7 +719,7 @@ return:
           [(begin ,[(Expr 'effect) -> e* u*] ... ,[e u])
            (values
              (make-begin `(,e* ... ,e))
-             (union u (apply union u*)))]
+             (apply union u u*))]
           [(let ,bd*
              (assigned (,as* ...) ,[body u]))
            (let-values ([(bd-used* bd-unused*)
@@ -777,7 +776,7 @@ return:
                (values `(quote ,imm) '())
                (values '(void) '()))]
           [(,[(Expr 'value) -> proc u] ,[(Expr 'value) -> arg* u*] ...)
-           (values `(,proc ,arg* ...) (union u (apply union u*)))]
+           (values `(,proc ,arg* ...) (apply union u u*))]
           [,x (guard (uvar? x))
             (if (eq? ctx 'value)
                 (values x (list x))
@@ -888,19 +887,19 @@ return:
         [(if ,[Expr -> cond f1] ,[Expr -> conseq f2] ,[Expr -> alter f3])
          (values `(if ,cond ,conseq ,alter) (union f1 f2 f3))]
         [(begin ,[Expr -> expr* f*] ... ,[Expr -> expr f])
-         (values `(begin ,expr* ... ,expr) (union f (apply union f*)))]
+         (values `(begin ,expr* ... ,expr) (apply union f f*))]
         [(let ([,uvar* ,[Expr -> body* f*]] ...) ,[Expr -> body f])
          (values `(let ([,uvar* ,body*] ...) ,body) (union (difference f uvar*) (apply union f*)))]
         [(letrec ([,uvar* (lambda (,formal** ...) ,[Expr -> body* f*])] ...) ,[Expr -> body f])
          (let ([f*^ (map difference f* formal**)])
            (values
              `(letrec ([,uvar* (lambda (,formal** ...) (free ,f*^ ,body*))] ...) ,body)
-             (difference (union f (apply union f*^)) uvar*)))]
+             (difference (apply union f f*^) uvar*)))]
         [(,prim ,[Expr -> rand* f*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union f*))]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc f] ,[Expr -> arg* f*] ...)
-         (values `(,proc ,arg* ...) (union f (apply union f*)))]
+         (values `(,proc ,arg* ...) (apply union f f*))]
         [,x (guard (uvar? x)) (values x (list x))])))
   (lambda (p)
     (let-values ([(p^ fv) (Expr p)]) p^)))
@@ -972,13 +971,13 @@ return:
         [(if ,[cond u1] ,[conseq u2] ,[alter u3])
          (values `(if ,cond ,conseq ,alter) (union u1 u2 u3))]
         [(begin ,[e* u*] ... ,[e u])
-         (values `(begin ,e* ... ,e) (union u (apply union u*)))]
+         (values `(begin ,e* ... ,e) (apply union u u*))]
         [(let ([,x* ,[e* u*]] ...) ,[body u])
-         (values `(let ([,x* ,e*] ...) ,body) (union u (apply union u*)))]
+         (values `(let ([,x* ,e*] ...) ,body) (apply union u u*))]
         [(letrec ([,lab* (lambda (,fml** ...)
                            (bind-free (,cp* ,fv** ...) ,[body* u*]))] ...)
            (closures ([,f* ,data** ...] ...) ,[body u]))
-         (let ([u^ (union u (apply union u*))])
+         (let ([u^ (apply union u u*)])
            (values
              `(letrec ([,lab* (lambda (,fml** ...)
                                 (bind-free (,cp* ,fv** ...) ,body*))] ...)
@@ -989,7 +988,7 @@ return:
          (values `(,prim ,rand* ...) (apply union u*))]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[proc u] ,cp ,[arg* u*] ...)
-         (values `(,proc ,cp ,arg* ...) (union u (apply union u*)))]
+         (values `(,proc ,cp ,arg* ...) (apply union u u*))]
         [,x (guard (uvar? x)) (values x (list x))]
         [,lab (guard (label? lab)) (values lab '())])))
   (lambda (p)
@@ -1068,8 +1067,8 @@ return:
 (define-who optimize-self-reference
   (define Expr
     (lambda (self cp)
-      (lambda (e)
-        (match e
+      (lambda (expr)
+        (match expr
           [(letrec ([,lab* ,lam*] ...)
              (closures ([,f* ,code* ,[fv**] ...] ...)
                ,[body]))
@@ -1078,7 +1077,7 @@ return:
                   [lam*^ (map (lambda (lab lam)
                                 (cond [(assq lab lab->self) =>
                                        (lambda (self) ((Lambda (cdr self)) lam))]
-                                      [else lam]))
+                                      [else ((Lambda #f) lam)]))
                            lab* lam*)])
              `(letrec ([,lab* ,lam*^] ...)
                 (closures ([,f* ,code* ,fv**^ ...] ...)
@@ -1097,6 +1096,12 @@ return:
     (lambda (self)
       (lambda (lam)
         (match lam
+          [(lambda (,fml* ...)
+             (bind-free (dummy)
+               ,[(Expr #f #f) -> body]))
+           `(lambda (,fml* ...)
+              (bind-free (dummy)
+                ,body))]
           [(lambda (,cp ,fml* ...)
              (bind-free (,cp ,fv* ...) ,body))
            `(lambda (,cp ,fml* ...)
@@ -1164,16 +1169,16 @@ return:
         [(if ,[Expr -> cond b1] ,[Expr -> conseq b2] ,[Expr -> alter b3])
          (values `(if ,cond ,conseq ,alter) (append b1 b2 b3))]
         [(begin ,[Expr -> expr* b*] ... ,[Expr -> expr b])
-         (values `(begin ,expr* ... ,expr) (append (apply append b*) b))]
+         (values `(begin ,expr* ... ,expr) (apply append b b*))]
         [(let ([,uvar* ,[Expr -> expr* b*]] ...) ,[Expr -> expr b])
-         (values `(let ([,uvar* ,expr*] ...) ,expr) (append (apply append b*) b))]
+         (values `(let ([,uvar* ,expr*] ...) ,expr) (apply append b b*))]
         [(letrec ([,lab* (lambda ,uvars* ,[Expr -> body* b*])] ...) ,[Expr -> body b])
-         (values body (append (apply append (map cons `([,lab* (lambda ,uvars* ,body*)] ...) b*)) b))]
+         (values body (apply append b (map cons `([,lab* (lambda ,uvars* ,body*)] ...) b*)))]
         [(,prim ,[Expr -> rand* b*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply append b*))]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[Expr -> proc b] ,[Expr -> arg* b*] ...)
-         (values `(,proc ,arg* ...) (append b (apply append b*)))]
+         (values `(,proc ,arg* ...) (apply append b b*))]
         [,x (values x '())])))
   (lambda (p)
     (let-values ([(body binds) (Expr p)])
@@ -1487,10 +1492,10 @@ return:
       (match t
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Tail -> tail u c])
          (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,tail))
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Tail -> tail u c])
          (values `(begin ,effect* ... ,tail)
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(if ,[Pred -> cond u1 c1] ,[Tail -> conseq u2 c2] ,[Tail -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
            (union u1 u2 u3) (or u1 u2 u3))]
@@ -1502,17 +1507,17 @@ return:
            (union u1 u2) (or c1 c2))]
         [(,[Value -> proc u c] ,[Value -> arg* u* c*] ...)
          (values `(,proc ,arg* ...)
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [,x (values x '() #f)])))
   (define Pred
     (lambda (p)
       (match p
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Pred -> pred u c])
          (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,pred))
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Pred -> pred u c])
          (values `(begin ,effect* ... ,pred)
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(if ,[Pred -> cond u1 c1] ,[Pred -> conseq u2 c2] ,[Pred -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
            (union u1 u2 u3) (or c1 c2 c3))]
@@ -1525,10 +1530,10 @@ return:
       (match e
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Effect -> effect u c])
          (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,effect))
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Effect -> effect u c])
          (values `(begin ,effect* ... ,effect)
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(if ,[Pred -> cond u1 c1] ,[Effect -> conseq u2 c2 ] ,[Effect -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
            (union u1 u2 u3) (or c1 c2 c3))]
@@ -1537,17 +1542,17 @@ return:
            (union u1 u2 u3) (or c1 c2 c3))]
         [(,[Value -> proc u c] ,[Value -> arg* u* c*] ...)
          (values `(,proc ,arg* ...)
-           (apply union (cons u u*)) #t)]
+           (apply union u u*) #t)]
         [(nop) (values '(nop) '() #f)])))
   (define Value
     (lambda (v)
       (match v
         [(let ([,uvar* ,[Value -> value* u* c*]] ...) ,[Value -> value u c])
          (values (make-begin `(,@(reorder-assign `((,uvar* ,value* ,u* ,c*) ...)) ,value))
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(begin ,[Effect -> effect* u* c*] ... ,[Value -> value u c])
          (values `(begin ,effect* ... ,value)
-           (apply union (cons u u*)) (ormap id (cons c c*)))]
+           (apply union u u*) (ormap id (cons c c*)))]
         [(if ,[Pred -> cond u1 c1] ,[Value -> conseq u2 c2] ,[Value -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
            (union u1 u2 u3) (or c1 c2 c3))]
@@ -1559,7 +1564,7 @@ return:
            (union u1 u2) (or c1 c2))]
         [(,[Value -> proc u c] ,[Value -> arg* u* c*] ...)
          (values `(,proc ,arg* ...)
-           (apply union (cons u u*)) #t)]
+           (apply union u u*) #t)]
         [,x (values x (if (uvar? x) (list x) '()) #f)])))
   (lambda (p)
     (match p
@@ -1745,7 +1750,6 @@ return:
              (let ([prologue (cons `(set! ,rp ,return-address-register)
                                (fetch-arguments parameter parameter-registers))])
                `(locals (,uvar* ... ,rp ,parameter ... ,new-frames ... ...)
-                  ;; ,(append uvar* (cons rp parameter) (apply append new-frames))
                   (new-frames ,new-frames
                     (begin ,@prologue ,tail))))])))))
   (define Tail
@@ -2139,7 +2143,7 @@ return:
            (append u1 u2 u3))]
         [(begin ,[Effect -> effect* u*] ... ,[Tail -> tail u])
          (values (make-begin `(,effect* ... ,tail))
-           (apply append (cons u u*)))]
+           (apply append u u*))]
         [(,triv ,loc* ...)
          (if (integer? triv)
              (let ([temp (unique-name 't)])
@@ -2154,7 +2158,7 @@ return:
            (append u1 u2 u3))]
         [(begin ,[Effect -> effect* u*] ... ,[Pred -> pred u])
          (values (make-begin `(,effect* ... ,pred)) ;; here too
-           (apply append (cons u u*)))]
+           (apply append u u*))]
         [(,rel ,x ,y)
          (cond [(and (frame-var? x) (frame-var? y))
                 (let ([temp (unique-name 't)])
@@ -2189,7 +2193,7 @@ return:
            (append u1 u2 u3))]
         [(begin ,[Effect -> effect* u*] ... ,[Effect -> effect u])
          (values (make-begin `(,effect* ... ,effect)) ;; here too
-           (apply append (cons u u*)))]
+           (apply append u u*))]
         [(nop) (values '(nop) '())]
         [(mset! ,base ,offset ,expr)
          (cond [(not (very-trivial? expr))
@@ -3159,7 +3163,7 @@ return:
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
-              (if (not *max-inline-literal-size*) "No" (format "above ~a" *max-inline-literal-size*))
+              (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
               (bool->word *cp-1-enabled*)
