@@ -13,7 +13,7 @@
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
-(define *max-inline-literal-size* #f)
+(define *max-inline-literal-size* 0)
 
 (define decode-literal-label)
 
@@ -40,7 +40,7 @@
     (lambda (ptr)
       (let loop ([c 8] [x ptr])
         (unless (zero? c)
-          (int8->c-escape (mod x 255))
+          (int8->c-escape (mod x 256))
           (loop (- c 1) (div x 256))))))
   (define char->c-escape
     (lambda (ch) (int8->c-escape (char->integer ch))))
@@ -831,6 +831,7 @@ return:
       [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(quote ,imm) `(quote ,imm)]
       [((lambda (,uvar* ...) ,[body]) ,[arg*] ...)
        (make-let `([,uvar* ,arg*] ...) body)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
@@ -856,6 +857,7 @@ return:
            `(letrec ([,anon (lambda (,uvar* ...) ,body)])
               ,anon))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(quote ,imm) `(quote ,imm)]
         [(,[Expr -> proc] ,[Expr -> arg*] ...) `(,proc ,arg* ...)]
         [,x x])))
   Expr)
@@ -875,6 +877,7 @@ return:
        `(letrec ([,uvar* (lambda (,formal** ...) ,body*)] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(quote ,imm) `(quote ,imm)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x x])))
 
@@ -1168,6 +1171,7 @@ return:
          (values body (append (apply append (map cons `([,lab* (lambda ,uvars* ,body*)] ...) b*)) b))]
         [(,prim ,[Expr -> rand* b*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply append b*))]
+        [(quote ,imm) (values `(quote ,imm) '())]
         [(,[Expr -> proc b] ,[Expr -> arg* b*] ...)
          (values `(,proc ,arg* ...) (append b (apply append b*)))]
         [,x (values x '())])))
@@ -1295,10 +1299,10 @@ return:
          (let* ([tmp-car (unique-name 'tmp)]
                 [tmp-cdr (unique-name 'tmp)]
                 [tmp (unique-name 'tmp)]
-                [e1^ (if (or (integer? e1) (uvar? e1) (eq? (car e1) 'logor)) e1 tmp-car)] ;; too hack
-                [e2^ (if (or (integer? e2) (uvar? e2) (eq? (car e2) 'logor)) e2 tmp-cdr)]
-                [bd1 (if (or (integer? e1) (uvar? e1) (eq? (car e1) 'logor)) '() `([,tmp-car ,e1]))]
-                [bd2 (if (or (integer? e2) (uvar? e2) (eq? (car e2) 'logor)) '() `([,tmp-cdr ,e2]))])
+                [e1^ (if (or (integer? e1) (uvar? e1)) e1 tmp-car)]
+                [e2^ (if (or (integer? e2) (uvar? e2)) e2 tmp-cdr)]
+                [bd1 (if (or (integer? e1) (uvar? e1)) '() `([,tmp-car ,e1]))]
+                [bd2 (if (or (integer? e2) (uvar? e2)) '() `([,tmp-cdr ,e2]))])
            (make-let `(,@bd1 ,@bd2)
              `(let ([,tmp (+ (alloc ,size-pair) ,tag-pair)])
                 (begin (mset! ,tmp ,offset-car ,e1^)
@@ -3155,7 +3159,7 @@ return:
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
-              (if (not *max-inline-literal-size*) "No" *max-inline-literal-size*)
+              (if (not *max-inline-literal-size*) "No" (format "above ~a" *max-inline-literal-size*))
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
               (bool->word *cp-1-enabled*)
