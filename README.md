@@ -35,16 +35,16 @@ Comparison:
         optimize jumps:                Yes
 
 ** closure analysis report **
-       total closures created:  71
+       total closures created:  73
        total free var:          69
-       average free var:        0.971830985915493
+       average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5753
-       average code length:  35.079268292682926
+       total code length:    5774
+       average code length:  35.207317073170735
 (time (test-all-analyze))
     59 collections
-    0.206787233s elapsed cpu time, including 0.007704578s collecting
-    0.273332087s elapsed real time, including 0.007845003s collecting
-    496021904 bytes allocated, including 496291680 bytes reclaimed
+    0.169994175s elapsed cpu time, including 0.006086615s collecting
+    0.237339270s elapsed real time, including 0.006214169s collecting
+    493674240 bytes allocated, including 495636848 bytes reclaimed
 ```
