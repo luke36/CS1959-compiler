@@ -19,10 +19,10 @@
 #define SCHEME_ENTRY _scheme_entry
 #endif
 
-#define SYMBOL2ADDR _symbol2address
+#define SYMBOL_TO_ADDR _symbol_to_address
 
 extern long SCHEME_ENTRY(char *, char *);
-extern char *SYMBOL2ADDR(long);
+extern char *SYMBOL_TO_ADDR(long);
 
 /* locally defined functions */
 static char *guarded_area(long n);
@@ -287,7 +287,7 @@ static void print1(ptr x, int d) {
   } else if (x == _void) {
     printf("#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
-    printf("%s", SYMBOL2ADDR(x));
+    printf("%s", SYMBOL_TO_ADDR(x));
   }
 }
 

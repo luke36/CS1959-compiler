@@ -771,7 +771,7 @@
         (newline)
         (display-string output-string))
       'replace)
-    (unless (= (shell "gcc -m64 -o ~a runtime.c ~a > ~a 2>&1" exe-file src-file out-file) 0)
+    (unless (= (shell "gcc -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" exe-file src-file out-file) 0)
       (printf "========\n")
       (shell "cat ~a" out-file)
       (format-error who "build error(s)"))

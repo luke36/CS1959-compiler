@@ -23,167 +23,11 @@
 (define flag-true $true)
 (define flag-false $false)
 (define flag-nil $nil)
-(define flag-trivial 1)
-(define flag-pair 2)
-(define flag-vector 3)
-(define flag-vector-end 4)
-(define flag-empty-vector 5)
-
-(define-who emit-static-data
-  (define hex '#("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "A" "B" "C" "D" "E" "F"))
-  (define int8->c-escape
-    (lambda (int8)
-      (printf "\\x")
-      (printf (vector-ref hex (div int8 16)))
-      (printf (vector-ref hex (mod int8 16)))))
-  (define ptr->c-escape
-    (lambda (ptr)
-      (let loop ([c 8] [x ptr])
-        (unless (zero? c)
-          (int8->c-escape (mod x 256))
-          (loop (- c 1) (div x 256))))))
-  (define char->c-escape
-    (lambda (ch) (int8->c-escape (char->integer ch))))
-  (define encode
-    (lambda (lit)
-      (cond [(pair? lit)
-             (int8->c-escape flag-pair)
-             (encode (car lit))
-             (encode (cdr lit))]
-            [(and (vector? lit) (zero? (vector-length lit)))
-             (int8->c-escape flag-empty-vector)]
-            [(vector? lit)
-             (int8->c-escape flag-vector)
-             (ptr->c-escape (ash (vector-length lit) shift-fixnum))
-             (vector-for-each encode lit)
-             (int8->c-escape flag-vector-end)]
-            [(eq? lit $true) (int8->c-escape flag-true)]
-            [(eq? lit $false) (int8->c-escape flag-false)]
-            [(eq? lit $nil)  (int8->c-escape flag-nil)]
-            [else
-              (int8->c-escape flag-trivial)
-              (ptr->c-escape lit)])))
-  (lambda (data*)
-    (letrec ([emit-one
-               (lambda (data)
-                 (match data
-                   [(symbol-dump ((quote ,sym*) ...))
-                    (emit-label "_symbol_dump")
-                    (printf "    .ascii")
-                    (printf " \"")
-                    (for-each
-                      (lambda (sym)
-                        (string-for-each char->c-escape (symbol->string sym))
-                        (char->c-escape #\x00))
-                      sym*)
-                    (printf "\"\n")]
-                   [(,lab (encode-literal (quote ,complex)))
-                    (emit-label lab)
-                    (printf "    .ascii")
-                    (printf " \"")
-                    (encode complex)
-                    (printf "\"\n")]))])
-      (emit '.data)
-      ;; (emit '.section ".data")
-      (for-each emit-one data*))))
-
-(define emit-helper
-  (lambda ()
-    (emit '.global "_symbol2address")
-    (emit-label "_symbol2address")
-    (emit 'sarq shift-fixnum 'rdi)
-    (emit 'leaq "_symbol_dump(%rip)" 'rax)
-    (emit 'addq 'rdi 'rax)
-    (emit 'ret)
-    (emit-label decode-literal-label)
-    (printf
-"    movq $-2, %rax
-    movq %r8, %r9
-loop_entry:
-    movzbq 0(%r8), %rcx
-    addq $1, %r8
-    cmpq $2, %rcx
-    je case_pair
-    cmpq $1, %rcx
-    je case_trivial
-    cmpq $3, %rcx
-    je case_vector
-    cmpq $5, %rcx
-    je case_empty_vector
-default:
-    movq %rcx, %rsi
-    jmp go_up
-case_pair:
-    movq %rdx, %rsi
-    addq $16, %rdx
-    addq $1, %rsi
-    movq $-2, -1(%rsi)
-    movq %rax, 7(%rsi)
-    movq %rsi, %rax
-    jmp loop_entry
-case_trivial:
-    movq 0(%r8), %rsi
-    addq $8, %r8
-    jmp go_up
-case_vector:
-    movq 0(%r8), %rdi
-    addq $8, %r8
-    movq %rdx, %rsi
-    addq %rdi, %rdx
-    addq $8, %rdx
-    addq $3, %rsi
-    movq $0, -3(%rsi)
-    movq %rax, -3(%rsi, %rdi)
-    movq %rsi, %rax
-    jmp loop_entry
-case_empty_vector:
-    movq %rdx, %rsi
-    addq $8, %rdx
-    addq $3, %rsi
-    movq $0, -3(%rsi)
-    cmpq $-2, %rax
-    jne go_up
-    movq %rsi, %rax
-    jmp *%r15
-go_up:
-    movq %rax, %r10
-    andq $7, %r10
-    cmpq $1, %r10
-    jne pa_is_vector
-pa_is_pair:
-    cmpq $-2, -1(%rax)
-    jne is_cdr
-is_car:
-    movq %rsi, -1(%rax)
-    jmp loop_entry
-is_cdr:
-    movq 7(%rax), %rbx
-    movq %rsi, 7(%rax)
-    jmp return_or_up
-pa_is_vector:
-    cmpb $4, 0(%r8)
-    je is_last_element
-not_last_element:
-    movq -3(%rax), %r10
-    movq %rsi, 5(%rax, %r10)
-    addq $8, -3(%rax)
-    jmp loop_entry
-is_last_element:
-    addq $1, %r8
-    movq -3(%rax), %r10
-    movq 5(%rax, %r10), %rbx
-    movq %rsi, 5(%rax, %r10)
-    addq $8, -3(%rax)
-return_or_up:
-    cmpq $-2, %rbx
-    je return
-    movq %rax, %rsi
-    movq %rbx, %rax
-    jmp go_up
-return:
-    movq %rax, 0(%r9)
-    jmp *%r15
-")))
+(define flag-trivial 0)
+(define flag-pair 1)
+(define flag-vector 2)
+(define flag-vector-end 3)
+(define flag-empty-vector 4)
 
 (define take
   (lambda (n lst)
@@ -196,7 +40,6 @@ return:
           [(= n 0) lst]
           [else (drop (- n 1) (cdr lst))])))
 (define id (lambda (x) x))
-(define diverge (lambda () (diverge)))
 
 (define binops
   '(+ - * logand logor sra))
@@ -618,7 +461,7 @@ return:
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x (guard (uvar? x)) x])))
 
-(define-who optimize-constant ;; optimize binding to procedure
+(define-who optimize-constant
   (define primitive->datum
     (lambda (prim)
       (match prim
@@ -642,6 +485,7 @@ return:
         [pair?         pair?]
         [procedure?    procedure?]
         [vector?       vector?]
+        [symbol?       symbol?]
         [,x            #f])))
   (define complex?
     (lambda (im)
@@ -684,7 +528,7 @@ return:
           [(set! ,uvar ,[(Expr env) -> expr value])
            (values `(set! ,uvar ,expr) (list (void)))]
           [(lambda (,uvar* ...) (assigned (,a* ...) ,[(Expr env) -> body _]))
-           (values `(lambda (,uvar* ...) (assigned (,a* ...) ,body)) (list diverge))]
+           (values `(lambda (,uvar* ...) (assigned (,a* ...) ,body)) '())]
           [(,prim ,[(Expr env) -> rand* v*] ...) (guard (primitive? prim))
            (cond [(and (not (exists null? v*))
                        (primitive->datum prim)) =>
@@ -962,7 +806,9 @@ return:
                `(,proc ,arg* ...))]
           [,x (guard (uvar? x)) x]))))
   (lambda (p)
-    ((Expr '()) p)))
+    (if *closure-optimization-enabled*
+        ((Expr '()) p)
+        p)))
 
 (define-who uncover-well-known
   (define Expr
@@ -1413,7 +1259,7 @@ return:
                    [,lab* (encode-literal (quote ,complex*))] ...)
                (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
                  (begin (,l* ,lab*) ...
-                   ,body))))])])))
+                        ,body))))])])))
 
 (define-who uncover-locals
   (define locals #f)
@@ -2157,7 +2003,7 @@ return:
          (values `(if ,cond ,conseq ,alter)
            (append u1 u2 u3))]
         [(begin ,[Effect -> effect* u*] ... ,[Pred -> pred u])
-         (values (make-begin `(,effect* ... ,pred)) ;; here too
+         (values (make-begin `(,effect* ... ,pred))
            (apply append u u*))]
         [(,rel ,x ,y)
          (cond [(and (frame-var? x) (frame-var? y))
@@ -2192,7 +2038,7 @@ return:
          (values `(if ,cond ,conseq ,alter)
            (append u1 u2 u3))]
         [(begin ,[Effect -> effect* u*] ... ,[Effect -> effect u])
-         (values (make-begin `(,effect* ... ,effect)) ;; here too
+         (values (make-begin `(,effect* ... ,effect))
            (apply append u u*))]
         [(nop) (values '(nop) '())]
         [(mset! ,base ,offset ,expr)
@@ -3196,7 +3042,8 @@ return:
            (emit-static-data data*)
            (emit '.text)
            (emit-program (emit* stmt*))
-           (emit-helper))])))
+           (emit-label decode-literal-label)
+           (emit 'jmp "_decode_literal"))])))
   (define Statement
     (lambda (s)
       (match s
@@ -3214,6 +3061,94 @@ return:
                             (emit 'leaq v2 v1)
                             (emit 'movq v2 v1))])))
   Program)
+
+(define emit-static-data
+  (let ([buffer #f]
+        [size #f]
+        [first? #t]
+        [has-symbol? #f]
+        [has-complex? #f])
+    (define init
+      (lambda ()
+        (set! buffer '())
+        (set! size 0)
+        (set! first? #t)))
+    (define clear
+      (lambda ()
+        (if first?
+            (set! first? #f)
+            (printf ","))
+        (printf "0x")
+        (for-each (lambda (byte) (printf "~2,'0,,:X" byte)) buffer)
+        (set! buffer '())
+        (set! size 0)))
+    (define sweep
+      (lambda ()
+        (unless (= 0 size)
+          (let loop ([i (- 8 size)])
+            (unless (= i 0)
+              (begin (Byte 0)
+                     (loop (sub1 i))))))))
+    (define Byte
+      (lambda (byte)
+        (set! buffer (cons byte buffer))
+        (set! size (add1 size))
+        (when (= size 8) (clear))))
+    (define Ptr
+      (lambda (ptr)
+        (let loop ([c 8] [x ptr])
+          (unless (zero? c)
+            (Byte (mod x 256))
+            (loop (- c 1) (div x 256))))))
+    (define Char
+      (lambda (ch) (Byte (char->integer ch))))
+    (define Datum
+      (lambda (lit)
+        (cond [(pair? lit)
+               (Byte flag-pair)
+               (Datum (car lit))
+               (Datum (cdr lit))]
+              [(and (vector? lit) (zero? (vector-length lit)))
+               (Byte flag-empty-vector)]
+              [(vector? lit)
+               (Byte flag-vector)
+               (Ptr (ash (vector-length lit) shift-fixnum))
+               (vector-for-each Datum lit)
+               (Byte flag-vector-end)]
+              [(eq? lit $true) (Byte flag-true)]
+              [(eq? lit $false) (Byte flag-false)]
+              [(eq? lit $nil)  (Byte flag-nil)]
+              [else
+                (Byte flag-trivial)
+                (Ptr lit)])))
+    (define Data
+      (lambda (data)
+        (match data
+          [(symbol-dump ((quote ,sym*) ...))
+           (emit '.global "_symbol_dump")
+           (emit-label "_symbol_dump")
+           (if (null? sym*)
+               (emit '.ascii "\"\"")
+               (begin
+                 (printf "    .quad ")
+                 (init)
+                 (for-each
+                   (lambda (sym)
+                     (string-for-each Char (symbol->string sym))
+                     (Char #\x00))
+                   sym*)
+                 (sweep)
+                 (printf "\n")))]
+          [(,lab (encode-literal (quote ,complex)))
+           (emit-label lab)
+           (printf "    .quad ")
+           (init)
+           (Datum complex)
+           (sweep)
+           (printf "\n")])))
+    (lambda (data*)
+      (emit '.data)
+      (for-each Data data*))))
 
 (compiler-passes '(
   parse-scheme
