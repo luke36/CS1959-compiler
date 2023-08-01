@@ -13,10 +13,9 @@
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
-(define *max-inline-literal-size* #f)
+(define *max-inline-literal-size* 0)
 
-(define decode-literal-label)
-
+(define stack-base-register 'r14)
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
 
@@ -229,6 +228,7 @@
           [(quote ,datum)
            (check-datum datum)
            `(quote ,datum)]
+          [(call/cc ,[(Expr env) -> expr]) `(call/cc ,expr)]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq])
            `(if ,cond ,conseq (void))]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq] ,[(Expr env) -> alter])
@@ -242,7 +242,7 @@
                (format-error who "setting a non-variable expression in ~s" x)
                `(set! ,((Var env) var) ,expr))]
           [(lambda (,formal* ...) ,expr* ...)
-           (if (<= (length expr*) 0) (format-error who "empty body in ~s" x)) ;; can improve
+           (if (<= (length expr*) 0) (format-error who "empty body in ~s" x)) ; can improve
            (check-bind-variable formal* x)
            (let* ([uvar* (map unique-name formal*)]
                   [env^ (append (map cons formal* uvar*) env)]
@@ -272,7 +272,7 @@
   (define Expr
     (lambda (e)
       (match e
-        [,prim (guard (user-primitive? prim))
+        [,prim (guard (or (user-primitive? prim) (eq? prim 'call/cc)))
          (when (not (assq prim bindings))
            (let ([new-p (unique-name prim)]
                  [new-fml* (let gen ([c (user-primitive->arity prim)])
@@ -289,6 +289,7 @@
         [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
         [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
         [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(call/cc ,[expr]) `(call/cc ,expr)]
         [(quote ,imm) `(quote ,imm)]
         [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
         [,x (guard (uvar? x)) x])))
@@ -338,6 +339,7 @@
         [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
         [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
         [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(call/cc ,[expr]) `(call/cc ,expr)]
         [(quote ,imm)
          (if (and (or (pair? imm) (vector? imm))
                   (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
@@ -388,6 +390,8 @@
            (difference a uvar*))]
         [(,prim ,[Expr -> rand* a*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union a*))]
+        [(call/cc ,[Expr -> expr a])
+         (values `(call/cc ,expr) a)]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc a] ,[Expr -> arg* a*] ...)
          (values `(,proc ,arg* ...) (apply union a a*))]
@@ -414,6 +418,7 @@
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f) expr)]
           [(,prim ,rand* ...) (guard (primitive? prim))
            (for-all (simple? x* reduc-now?) rand*)]
+          [(call/cc ,expr) #f]
           [(quote ,imm) #t]
           [(,proc ,arg* ...)
            (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*)))]
@@ -457,6 +462,7 @@
       [(lambda (,uvar* ...) (assigned (,as* ...) ,[expr]))
        `(lambda (,uvar* ...) (assigned (,as* ...) ,expr))]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x (guard (uvar? x)) x])))
@@ -472,7 +478,6 @@
         [cdr           cdr]
         [cons          cons]
         [vector-length vector-length]
-        [void          void]
         [<=            <=]
         [<             <]
         [=             =]
@@ -538,6 +543,7 @@
                             [(complex? v) (values `(,prim ,rand* ...) (list v))]
                             [else (values `(quote ,v) (list v))])))]
                  [else (values `(,prim ,rand* ...) '())])]
+          [(call/cc ,[(Expr env) -> expr _]) (values `(call/cc ,expr) '())]
           [(quote ,imm) (values `(quote ,imm) (list imm))]
           [(,[(Expr env) -> proc _] ,[(Expr env) -> arg* _*] ...)
            (values `(,proc ,arg* ...) '())]
@@ -615,6 +621,8 @@
              (apply union u*))]
           [(,prim ,[(Expr 'value) -> rand* u*] ...) (guard (primitive? prim))
            (values `(,prim ,rand* ...) (apply union u*))]
+          [(call/cc ,[(Expr 'value) -> expr u])
+           (values `(call/cc ,expr) u)]
           [(quote ,imm)
            (if (eq? ctx 'value)
                (values `(quote ,imm) '())
@@ -660,6 +668,7 @@
                 ,(make-let `([,as* (cons ,new-t* (void))] ...)
                    ((Expr (append as* assigned)) expr))))]
           [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
           [,x (guard (uvar? x)) (if (memq x assigned) `(car ,x) x)]))))
@@ -674,6 +683,7 @@
       [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [((lambda (,uvar* ...) ,[body]) ,[arg*] ...)
        (make-let `([,uvar* ,arg*] ...) body)]
@@ -700,6 +710,7 @@
            `(letrec ([,anon (lambda (,uvar* ...) ,body)])
               ,anon))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(call/cc ,[Expr -> expr]) `(call/cc ,expr)]
         [(quote ,imm) `(quote ,imm)]
         [(,[Expr -> proc] ,[Expr -> arg*] ...) `(,proc ,arg* ...)]
         [,x x])))
@@ -720,6 +731,7 @@
        `(letrec ([,uvar* (lambda (,formal** ...) ,body*)] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x x])))
@@ -741,6 +753,8 @@
              (difference (apply union f f*^) uvar*)))]
         [(,prim ,[Expr -> rand* f*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union f*))]
+        [(call/cc ,[Expr -> expr f])
+         (values `(call/cc ,expr) f)]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc f] ,[Expr -> arg* f*] ...)
          (values `(,proc ,arg* ...) (apply union f f*))]
@@ -768,6 +782,7 @@
               (closures ([,uvar* ,lab* ,fv** ...] ...) ,body)))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim))
          `(,prim ,rand* ...)]
+        [(call/cc ,[Expr -> expr]) `(call/cc ,expr)]
         [(quote ,imm) e]
         [(,[Expr -> proc] ,[Expr -> arg*] ...)
          (if (uvar? proc)
@@ -799,6 +814,8 @@
                 (closures ([,uvar* ,data** ...] ...) ,((Expr known^) body))))]
           [(,prim ,[(Expr known) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
+          [(call/cc ,[(Expr known) -> expr])
+           `(call/cc ,expr)]
           [(quote ,imm) e]
           [(,proc ,[(Expr known) -> arg*] ...)
            (if (memq proc known)
@@ -832,6 +849,7 @@
              (values (difference u^ f*))))]
         [(,prim ,[rand* u*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union u*))]
+        [(call/cc ,[expr u]) (values `(call/cc ,expr) u)]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[proc u] ,cp ,[arg* u*] ...)
          (values `(,proc ,cp ,arg* ...) (apply union u u*))]
@@ -884,6 +902,7 @@
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
           [(,prim ,[rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
+          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,cp ,[arg*] ...)
            (if (memq proc wk-lab)
@@ -933,6 +952,7 @@
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
           [(,prim ,[rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
+          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
           [,x (guard (uvar? x))
@@ -996,9 +1016,10 @@
                 ,(make-begin `(,fill* ... ,body))))]
           [(,prim ,[(Expr cp fvs) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
+          [(call/cc ,[(Expr cp fvs) -> expr]) `(call/cc ,expr)]
           [(quote ,imm) e]
           [(,[(Expr cp fvs) -> proc] ,[(Expr cp fvs) -> arg*] ...)
-           (if (label? proc) ;; in the presence of optimize-known-call
+           (if (label? proc) ; in the presence of optimize-known-call
                `(,proc ,arg* ...)
                `((procedure-code ,proc) ,arg* ...))]
           [,x (guard (uvar? x))
@@ -1022,6 +1043,7 @@
          (values body (apply append b (map cons `([,lab* (lambda ,uvars* ,body*)] ...) b*)))]
         [(,prim ,[Expr -> rand* b*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply append b*))]
+        [(call/cc ,[Expr -> expr b]) (values `(call/cc ,expr) b)]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[Expr -> proc b] ,[Expr -> arg* b*] ...)
          (values `(,proc ,arg* ...) (apply append b b*))]
@@ -1047,6 +1069,7 @@
          `(if (,prim ,rand* ...) '#t '#f)]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(begin (,prim ,rand* ...) (void))]
+        [(call/cc ,[Value -> expr]) `(call/cc ,expr)]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(,proc ,arg* ...)]
         [,lab (guard (label? lab)) lab]
@@ -1068,6 +1091,8 @@
          `(,prim ,rand* ...)]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(begin (,prim ,rand* ...) (true))]
+        [(call/cc ,[Value -> expr])
+         `(if (eq? (call/cc ,expr) '#f) (false) (true))]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(if (eq? (,proc ,arg* ...) '#f) (false) (true))]
         [,lab (guard (label? lab)) '(true)]
@@ -1085,11 +1110,12 @@
         [(let ([,uvar* ,[Value -> body*]] ...) ,[Effect -> body])
          `(let ([,uvar* ,body*] ...) ,body)]
         [(,prim ,[Effect -> rand*] ...) (guard (value-primitive? prim))
-         (make-nopless-begin `(,rand* ...))] ;; call/cc??
+         (make-nopless-begin `(,rand* ...))] ; call/cc??
         [(,prim ,[Effect -> rand*] ...) (guard (predicate-primitive? prim))
          (make-nopless-begin `(,rand* ...))]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(,prim ,rand* ...)]
+        [(call/cc ,[Value -> expr]) `(call/cc ,expr)]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(,proc ,arg* ...)]
         [,lab (guard (label? lab)) '(nop)]
@@ -1109,6 +1135,7 @@
             [(vector? ?complex)
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
+  (define call/cc-label #f)
   (define current-length #f)
   (define symbol->index #f)
   (define label-complex* #f)
@@ -1128,6 +1155,7 @@
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Value -> value])
          `(let ([,uvar* ,value*] ...) ,value)]
         [(quote ,[Immediate -> imm]) imm]
+        [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(+ ,[Value -> rand1] ,[Value -> rand2]) `(+ ,rand1 ,rand2)]
         [(- ,[Value -> rand1] ,[Value -> rand2]) `(- ,rand1 ,rand2)]
         [(* ,[Value -> rand1] ,[Value -> rand2])
@@ -1162,7 +1190,7 @@
         [(make-procedure ,[Value -> lab] ,[Value -> e])
          (if (integer? e)
              (let ([tmp (unique-name 'tmp)])
-               `(let ([,tmp (+ (alloc ,(+ disp-procedure-data e)) ,tag-procedure)]) ;; what if it overflows?
+               `(let ([,tmp (+ (alloc ,(+ disp-procedure-data e)) ,tag-procedure)]) ; what if it overflows?
                   (begin (mset! ,tmp ,offset-procedure-code ,lab)
                          ,tmp)))
              (let ([tmp1 (unique-name 'tmp)] [tmp2 (unique-name 'tmp)])
@@ -1213,6 +1241,7 @@
          `(begin ,effect* ... ,effect)]
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Effect -> effect])
          `(let ([,uvar* ,value*] ...) ,effect)]
+        [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(set-car! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-car ,e)]
         [(set-cdr! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-cdr ,e)]
         [(procedure-set! ,[Value -> proc] ,[Value -> ind] ,[Value -> e])
@@ -1248,14 +1277,17 @@
     (set! current-length 0)
     (set! symbol->index '())
     (set! label-complex* '())
+    (set! call/cc-label (unique-label 'call/cc))
     (match p
       [(letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body])
        (match label-complex*
          [([,lab* ,complex*] ...)
-          (set! decode-literal-label (unique-label 'decode-literal))
-          (let ([l* (map (lambda (v) decode-literal-label) lab*)])
+          (let* ([decode-literal-label (unique-label 'decode-literal)]
+                 [l* (map (lambda (v) decode-literal-label) lab*)])
             `(let ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                    (reverse symbol->index))]
+                   [label-alias ((,decode-literal-label "_decode_literal")
+                                 (,call/cc-label "_call_with_current_continuation"))]
                    [,lab* (encode-literal (quote ,complex*))] ...)
                (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
                  (begin (,l* ,lab*) ...
@@ -1302,7 +1334,7 @@
         [(mset! ,[Value ->] ,[Value ->] ,[Value ->]) (values)]
         [(,[Value ->] ,[Value ->] ...) (values)]
         [(nop) (values)])))
-  (define Value ;; in fact here Value is identical to Tail
+  (define Value ; in fact here Value is identical to Tail
     (lambda (v)
       (match v
         [(let ([,uvar* ,[Value ->]] ...) ,[Value ->])
@@ -1419,7 +1451,7 @@
 
 (define verify-uil (lambda (x) x))
 
-(define-who remove-complex-opera* ;; can improve
+(define-who remove-complex-opera* ; can improve
   (define fresh-locals #f)
   (define introduce-local
     (lambda (x)
@@ -1616,10 +1648,17 @@
                      ,@fill-register
                      (set! ,return-address-register ,rp)
                      (,proc
-                       ,frame-pointer-register,return-address-register ,allocation-pointer-register
+                       ,frame-pointer-register
+                       ,return-address-register
+                       ,allocation-pointer-register
+                       ,stack-base-register
                        ,@(map cadr fill-register) ,@(map cadr fill-frame))))]
           [,expr `(begin (set! ,return-value-register ,expr)
-                         (,rp ,frame-pointer-register ,return-value-register ,allocation-pointer-register))]))))
+                         (,rp
+                           ,frame-pointer-register
+                           ,return-value-register
+                           ,allocation-pointer-register
+                           ,stack-base-register))]))))
   (define Pred
     (lambda (p)
       (match p
@@ -1646,7 +1685,10 @@
                      ,@fill-register
                      (set! ,return-address-register ,rp-label)
                      (,proc
-                       ,frame-pointer-register ,return-address-register ,allocation-pointer-register
+                       ,frame-pointer-register
+                       ,return-address-register
+                       ,allocation-pointer-register
+                       ,stack-base-register
                        ,@(map cadr fill-register) ,@(map cadr fill-new-frame)))))]
         [(set! ,uvar (,proc ,args* ...)) (guard
                                            (not (binop? proc))
@@ -1878,9 +1920,12 @@
       (lambda (e)
         (match e
           [(return-point ,label ,tail)
-           `(begin (set! ,frame-pointer-register (+ ,frame-pointer-register ,(ash size align-shift)))
-                   ,e
-                   (set! ,frame-pointer-register (- ,frame-pointer-register ,(ash size align-shift))))]
+           (if (zero? size) e ; impossible though
+               `(begin (set! ,frame-pointer-register
+                         (+ ,frame-pointer-register ,(ash size align-shift)))
+                       (return-point ,label ,tail)
+                       (set! ,frame-pointer-register
+                         (- ,frame-pointer-register ,(ash size align-shift)))))]
           [(if ,[(Pred size) -> cond] ,[(Effect size) -> conseq] ,[(Effect size) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect size) -> effect*] ... ,[(Effect size) -> effect])
@@ -2022,7 +2067,7 @@
                 (let ([temp (unique-name 't)])
                   (let-values ([(p^ u) (Pred `(begin (set! ,temp ,y) (,rel ,x ,temp)))])
                     (values p^ (cons temp u))))]
-               [(and (integer? x) (integer? y)) ;; yes we can do better but just leave it to PE
+               [(and (integer? x) (integer? y)) ; yes we can do better but just leave it to PE
                 (let ([temp (unique-name 't)])
                   (values `(begin (set! ,temp ,x) (,rel ,temp ,y))
                     (list temp)))]
@@ -2109,7 +2154,7 @@
                        (if (and (commutative? rator)
                                 (or (not-so-trivial? y)
                                     (and (very-trivial? x)
-                                         (or (uvar? y) (register? y))))) ;; chance to coalesce
+                                         (or (uvar? y) (register? y))))) ; chance to coalesce
                            (values y x)
                            (values x y))])
            (let ([temp (unique-name 't)])
@@ -2120,7 +2165,7 @@
         [(set! ,fv (,rator ,x ,y))
          (cond [(and (not (eq? rator '*))
                      (very-trivial? x)
-                     (not (eq? fv y))) ;; otherwise not sound
+                     (not (eq? fv y))) ; otherwise not sound
                 (let ([temp (unique-name 't)])
                   (let-values ([(e^ u)
                                 (Effect `(begin (set! ,fv ,x)
@@ -2333,7 +2378,7 @@
                                           (>= (length (cdr (assq t conf))) K)))
                                     y-conf)])
                            (< (+ (length x-conf-sig) (length y-conf-sig)) K))])
-                 y)))) ;; can improve
+                 y)))) ; can improve
       (cond
         [(select-entry mov (lambda (e)
                              (let ([x (car e)])
@@ -3029,6 +3074,44 @@
               (exact->inexact (/ (apply + *all-code-size*)
                                  (length *all-code-size*)))))))
 
+(define label-alias)
+
+(define-syntax emit-jump
+  (syntax-rules ()
+    [(_ opcode ?target)
+     (let ([target ?target])
+       (cond [(label? target) (emit opcode (label->x86-64-label target))]
+             [(string? target) (emit opcode target)]
+             [else (emit opcode (format "*~a" (rand->x86-64-arg target)))]))]))
+
+(define-syntax emit-program
+  (syntax-rules ()
+    [(_ code code* ...)
+     (begin
+       (emit '.globl "_scheme_entry")
+       (emit-label "_scheme_entry")
+       (emit 'pushq 'rbx)
+       (emit 'pushq 'rbp)
+       (emit 'pushq 'r12)
+       (emit 'pushq 'r13)
+       (emit 'pushq 'r14)
+       (emit 'pushq 'r15)
+       (emit 'movq 'rdi frame-pointer-register)
+       (emit 'movq 'rdi stack-base-register)
+       (emit 'movq 'rsi allocation-pointer-register)
+       (emit 'leaq "_scheme_exit(%rip)" return-address-register)
+       code code* ...
+       (emit-label "_scheme_exit")
+       (unless (eq? return-value-register 'rax)
+         (emit 'movq return-value-register 'rax))
+       (emit 'popq 'r15)
+       (emit 'popq 'r14)
+       (emit 'popq 'r13)
+       (emit 'popq 'r12)
+       (emit 'popq 'rbp)
+       (emit 'popq 'rbx)
+       (emit 'ret))]))
+
 (define-who generate-x86-64
   (define Program
     (lambda (p)
@@ -3041,20 +3124,22 @@
                              (emit* (cdr s))))])
            (emit-static-data data*)
            (emit '.text)
-           (emit-program (emit* stmt*))
-           (emit-label decode-literal-label)
-           (emit 'jmp "_decode_literal"))])))
+           (emit-program (emit* stmt*)))])))
+  (define Label
+    (lambda (lab)
+      (cond [(assq lab label-alias) => cadr]
+            [else lab])))
   (define Statement
     (lambda (s)
       (match s
         [,label (guard (label? label)) (emit-label label)]
-        [(jump ,dst) (emit-jump 'jmp dst)]
+        [(jump ,dst) (emit-jump 'jmp (Label dst))]
         [(if (,rel ,x ,y) (jump ,dst))
          (emit 'cmpq y x)
-         (emit-jump (rel->assembly rel) dst)]
+         (emit-jump (rel->assembly rel) (Label dst))]
         [(if (not (,rel ,x ,y)) (jump ,dst))
          (emit 'cmpq y x)
-         (emit-jump (not-rel->assembly rel) dst)]
+         (emit-jump (not-rel->assembly rel) (Label dst))]
         [(set! ,v1 (,rator ,v1 ,v2))
          (emit (binop->assembly rator) v2 v1)]
         [(set! ,v1 ,v2) (if (label? v2)
@@ -3139,6 +3224,7 @@
                    sym*)
                  (sweep)
                  (printf "\n")))]
+          [(label-alias ,alias) (set! label-alias alias)]
           [(,lab (encode-literal (quote ,complex)))
            (emit-label lab)
            (printf "    .quad ")
@@ -3178,7 +3264,7 @@
   verify-uil
   remove-complex-opera*
   flatten-set!
-  impose-calling-conventions
+  impose-calling-conventions ; only source of dead assignment (in this compiler)
   expose-allocation-pointer
   uncover-frame-conflict
   pre-assign-frame
@@ -3204,3 +3290,24 @@
 (load "tests15.scm")
 
 (trusted-passes #t)
+
+(define yin-yang
+  '(let ([count 20]
+         [res '()])
+     (let ([yin
+             ((lambda (cc)
+                (set! res (cons 1 res))
+                (set! count (- count 1))
+                (if (eq? count 0)
+                    (lambda (x) res)
+                    cc))
+              (call/cc (lambda (c) c)))])
+       (let ([yang
+               ((lambda (cc)
+                  (set! res (cons 0 res))
+                  (set! count (- count 1))
+                  (if (eq? count 0)
+                      (lambda (x) res)
+                      cc))
+                (call/cc (lambda (c) c)))])
+         (yin yang)))))

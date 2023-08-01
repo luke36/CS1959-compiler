@@ -2,33 +2,33 @@
 _decode_literal:
     movq $-2, %rax
     movq %r8, %r9
-loop_entry:
+DL_LOOP_ENTRY:
     movzbq 0(%r8), %rcx
     addq $1, %r8
     cmpq $1, %rcx
-    je case_pair
+    je DL_CASE_PAIR
     cmpq $0, %rcx
-    je case_trivial
+    je DL_CASE_TRIVIAL
     cmpq $2, %rcx
-    je case_vector
+    je DL_CASE_VECTOR
     cmpq $4, %rcx
-    je case_empty_vector
-default:
+    je DL_CASE_EMPTY_VECTOR
+DL_DEFAULT:
     movq %rcx, %rsi
-    jmp go_up
-case_pair:
+    jmp DL_GO_UP
+DL_CASE_PAIR:
     movq %rdx, %rsi
     addq $16, %rdx
     addq $1, %rsi
     movq $-2, -1(%rsi)
     movq %rax, 7(%rsi)
     movq %rsi, %rax
-    jmp loop_entry
-case_trivial:
+    jmp DL_LOOP_ENTRY
+DL_CASE_TRIVIAL:
     movq 0(%r8), %rsi
     addq $8, %r8
-    jmp go_up
-case_vector:
+    jmp DL_GO_UP
+DL_CASE_VECTOR:
     movq 0(%r8), %rdi
     addq $8, %r8
     movq %rdx, %rsi
@@ -38,52 +38,52 @@ case_vector:
     movq $0, -3(%rsi)
     movq %rax, -3(%rsi, %rdi)
     movq %rsi, %rax
-    jmp loop_entry
-case_empty_vector:
+    jmp DL_LOOP_ENTRY
+DL_CASE_EMPTY_VECTOR:
     movq %rdx, %rsi
     addq $8, %rdx
     addq $3, %rsi
     movq $0, -3(%rsi)
     cmpq $-2, %rax
-    jne go_up
+    jne DL_GO_UP
     movq %rsi, %rax
     jmp *%r15
-go_up:
+DL_GO_UP:
     movq %rax, %r10
     andq $7, %r10
     cmpq $1, %r10
-    jne pa_is_vector
-pa_is_pair:
+    jne DL_PA_IS_VECTOR
+DL_PA_IS_PAIR:
     cmpq $-2, -1(%rax)
-    jne is_cdr
-is_car:
+    jne DL_IS_CDR
+DL_IS_CAR:
     movq %rsi, -1(%rax)
-    jmp loop_entry
-is_cdr:
+    jmp DL_LOOP_ENTRY
+DL_IS_CDR:
     movq 7(%rax), %rbx
     movq %rsi, 7(%rax)
-    jmp return_or_up
-pa_is_vector:
+    jmp DL_DL_RETURN_OR_UP
+DL_PA_IS_VECTOR:
     cmpb $3, 0(%r8)
-    je is_last_element
-not_last_element:
+    je DL_IS_LAST_ELEMENT
+DL_NOT_LAST_ELEMENT:
     movq -3(%rax), %r10
     movq %rsi, 5(%rax, %r10)
     addq $8, -3(%rax)
-    jmp loop_entry
-is_last_element:
+    jmp DL_LOOP_ENTRY
+DL_IS_LAST_ELEMENT:
     addq $1, %r8
     movq -3(%rax), %r10
     movq 5(%rax, %r10), %rbx
     movq %rsi, 5(%rax, %r10)
     addq $8, -3(%rax)
-return_or_up:
+DL_DL_RETURN_OR_UP:
     cmpq $-2, %rbx
-    je return
+    je DL_RETURN
     movq %rax, %rsi
     movq %rbx, %rax
-    jmp go_up
-return:
+    jmp DL_GO_UP
+DL_RETURN:
     movq %rax, 0(%r9)
     jmp *%r15
 
@@ -93,3 +93,44 @@ _symbol_to_address:
     leaq _symbol_dump(%rip), %rax
     addq %rdi, %rax
     ret
+
+    .global _call_with_current_continuation
+_call_with_current_continuation:
+CALLCC_MAKE_CONT:
+    movq %rdx, %r9
+    addq $2, %r9
+    addq $24, %rdx
+    leaq _invoke_continuation(%rip), %r10
+    movq %r10, -2(%r9)
+    movq %r15, 6(%r9)
+    movq %rbp, %rcx
+    subq %r14, %rcx
+    movq %rcx, 14(%r9)
+    movq $0, %rbx
+CALLCC_LOOP_ENTRY:
+    cmpq %rbx, %rcx
+    je CALLCC_APPLY
+CALLCC_DO_COPY:
+    movq 0(%rbx, %r14), %r10
+    movq %r10, 0(%rdx, %rbx)
+    addq $8, %rbx
+    jmp CALLCC_LOOP_ENTRY
+CALLCC_APPLY:
+    addq %rcx, %rdx
+    jmp *-2(%r8)
+
+_invoke_continuation:
+    movq 14(%r8), %rax
+    movq %r14, %rbp
+    addq %rax, %rbp
+IC_LOOP_ENTRY:
+    cmpq $0, %rax
+    je IC_RETURN
+IC_DO_COPY:
+    movq 22(%rax, %r8), %r10
+    movq %r10, 0(%r14, %rax)
+    subq $8, %rax
+    jmp IC_LOOP_ENTRY
+IC_RETURN:
+    movq %r9, %rax
+    jmp *6(%r8)
