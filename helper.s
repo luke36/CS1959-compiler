@@ -1,7 +1,6 @@
-    .global _decode_literal
-_decode_literal:
+    .global _scheme_decode_literal
+_scheme_decode_literal:
     movq $-2, %rax
-    movq %r8, %r9
 DL_LOOP_ENTRY:
     movzbq 0(%r8), %rcx
     addq $1, %r8
@@ -84,23 +83,24 @@ DL_DL_RETURN_OR_UP:
     movq %rbx, %rax
     jmp DL_GO_UP
 DL_RETURN:
-    movq %rax, 0(%r9)
+    leaq _scheme_roots(%rip), %r10
+    movq %rax, 0(%r9, %r10)
     jmp *%r15
 
-    .global _symbol_to_address
-_symbol_to_address:
+    .global _scheme_symbol_to_address
+_scheme_symbol_to_address:
     sarq $3, %rdi
-    leaq _symbol_dump(%rip), %rax
+    leaq _scheme_symbol_dump(%rip), %rax
     addq %rdi, %rax
     ret
 
-    .global _call_with_current_continuation
-_call_with_current_continuation:
+    .global _scheme_call_with_current_continuation
+_scheme_call_with_current_continuation:
 CALLCC_MAKE_CONT:
     movq %rdx, %r9
     addq $2, %r9
     addq $24, %rdx
-    leaq _invoke_continuation(%rip), %r10
+    leaq _scheme_invoke_continuation(%rip), %r10
     movq %r10, -2(%r9)
     movq %r15, 6(%r9)
     movq %rbp, %rcx
@@ -119,7 +119,10 @@ CALLCC_APPLY:
     addq %rcx, %rdx
     jmp *-2(%r8)
 
-_invoke_continuation:
+    .data
+    .quad -1
+    .text
+_scheme_invoke_continuation:
     movq 14(%r8), %rax
     movq %r14, %rbp
     addq %rax, %rbp

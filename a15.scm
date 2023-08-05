@@ -1,3 +1,5 @@
+; todo: add end-of-allocation-register; put ra to stack; insert overflow checking; computing live-mask; add interrupt-return-point; gc itself
+
 (eval-when (compile load eval)
   (optimize-level 2)
   (case-sensitive #t)
@@ -14,8 +16,12 @@
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
 (define *max-inline-literal-size* 0)
+(define *collection-enabled* #f)
 
 (define stack-base-register 'r14)
+(define end-of-allocation-register 'r13)
+(define root-disp-length 0)
+(define root-disp-roots 8)
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
 
@@ -268,7 +274,7 @@
   (lambda (p) ((Expr '()) p)))
 
 (define-who convert-primitive
-  (define bindings #f)
+  (define bindings)
   (define Expr
     (lambda (e)
       (match e
@@ -304,8 +310,8 @@
       (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
             [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
             [else 1])))
-  (define bindings #f)
-  (define fillings #f)
+  (define bindings)
+  (define fillings)
   (define do-conversion
     (lambda (const)
       (cond
@@ -976,6 +982,7 @@
   (lambda (p) (if *closure-optimization-enabled* ((Expr #f #f) p) p)))
 
 (define-who introduce-procedure-primitives
+  (define number-of-free)
   (define index-of
     (lambda (x fvs)
       (let loop ([fv fvs] [i 0])
@@ -993,6 +1000,7 @@
       (lambda (c)
         (match c
           [(,uvar ,lab ,[(Expr cp fvs) -> fv*] ...)
+           (set! number-of-free (cons (list lab (length fv*)) number-of-free))
            (let ([set-free (let loop ([fv fv*] [i 0])
                              (cond [(null? fv) '()]
                                    [else (cons `(procedure-set! ,uvar (quote ,i) ,(car fv))
@@ -1027,7 +1035,11 @@
                    (lambda (i) `(procedure-ref ,cp (quote ,i)))]
                   [else x])]
           [,lab (guard (label? lab)) lab]))))
-  (lambda (x) ((Expr #f '()) x)))
+  (lambda (x)
+    (set! number-of-free '())
+    (let ([x^ ((Expr #f '()) x)])
+      `(let ([number-of-free ,number-of-free])
+         ,x^))))
 
 (define-who lift-letrec
   (define Expr
@@ -1049,8 +1061,11 @@
          (values `(,proc ,arg* ...) (apply append b b*))]
         [,x (values x '())])))
   (lambda (p)
-    (let-values ([(body binds) (Expr p)])
-      `(letrec ,binds ,body))))
+    (match p
+      [(let ,data ,body)
+       (let-values ([(body^ binds) (Expr body)])
+         `(let ,data
+            (letrec ,binds ,body^)))])))
 
 (define-who normalize-context
   (define Value
@@ -1123,8 +1138,8 @@
         [,x (format-error who "invalid expression ~s in effect context" x)])))
   (lambda (p)
     (match p
-      [(letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body])
-       `(letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
+      [(let ,data (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body]))
+       `(let ,data (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who specify-representation
   (define specify-complex
@@ -1135,10 +1150,12 @@
             [(vector? ?complex)
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
-  (define call/cc-label #f)
-  (define current-length #f)
-  (define symbol->index #f)
-  (define label-complex* #f)
+  (define call/cc-label)
+  (define current-length)
+  (define symbol->index)
+  (define label-complex-disp*)
+  (define root-label)
+  (define n-complex)
   (define offset-car (- disp-car tag-pair))
   (define offset-cdr (- disp-cdr tag-pair))
   (define offset-vector-length (- disp-vector-length tag-vector))
@@ -1270,31 +1287,41 @@
             [(integer? i) (ash i shift-fixnum)]
             [else
               (let ([lab (unique-label 'complex)])
-                (set! label-complex* (cons (list lab (specify-complex i))
-                                          label-complex*))
-                `(mref ,lab 0))])))
+                (set! label-complex-disp*
+                  (cons
+                    (list lab (specify-complex i) (ash n-complex align-shift))
+                    label-complex-disp*))
+                (set! n-complex (add1 n-complex))
+                `(mref ,root-label ,(ash (sub1 n-complex) align-shift)))])))
   (lambda (p)
     (set! current-length 0)
     (set! symbol->index '())
-    (set! label-complex* '())
+    (set! label-complex-disp* '())
     (set! call/cc-label (unique-label 'call/cc))
+    (set! root-label (unique-label 'root))
+    (set! n-complex 0)
     (match p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body])
-       (match label-complex*
-         [([,lab* ,complex*] ...)
+      [(let (,data* ...)
+         (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
+           ,[Value -> body]))
+       (match label-complex-disp*
+         [([,lab* ,complex* ,disp*] ...)
           (let* ([decode-literal-label (unique-label 'decode-literal)]
                  [l* (map (lambda (v) decode-literal-label) lab*)])
             `(let ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                    (reverse symbol->index))]
-                   [label-alias ((,decode-literal-label "_decode_literal")
-                                 (,call/cc-label "_call_with_current_continuation"))]
-                   [,lab* (encode-literal (quote ,complex*))] ...)
+                   [label-alias ((,decode-literal-label "_scheme_decode_literal")
+                                 (,call/cc-label "_scheme_call_with_current_continuation")
+                                 (,root-label "_scheme_roots"))]
+                   [,lab* (encode-literal (quote ,complex*))] ...
+                   [number-of-roots ,(+ (length registers) n-complex)]
+                   ,data* ...)
                (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
-                 (begin (,l* ,lab*) ...
+                 (begin (,l* ,lab* ,disp*) ...
                         ,body))))])])))
 
 (define-who uncover-locals
-  (define locals #f)
+  (define locals)
   (define Body
     (lambda (tail)
       (set! locals '())
@@ -1452,7 +1479,7 @@
 (define verify-uil (lambda (x) x))
 
 (define-who remove-complex-opera* ; can improve
-  (define fresh-locals #f)
+  (define fresh-locals)
   (define introduce-local
     (lambda (x)
       (set! fresh-locals (cons x fresh-locals))))
@@ -1594,7 +1621,7 @@
        `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
 
 (define-who impose-calling-conventions
-  (define new-frames #f)
+  (define new-frames)
   (define fetch-arguments
     (lambda (args which)
       (cond [(null? args) '()]
@@ -1652,13 +1679,15 @@
                        ,return-address-register
                        ,allocation-pointer-register
                        ,stack-base-register
+                       ,@(if *collection-enabled* (list end-of-allocation-register) '())
                        ,@(map cadr fill-register) ,@(map cadr fill-frame))))]
           [,expr `(begin (set! ,return-value-register ,expr)
                          (,rp
                            ,frame-pointer-register
                            ,return-value-register
                            ,allocation-pointer-register
-                           ,stack-base-register))]))))
+                           ,stack-base-register
+                           ,@(if *collection-enabled* (list end-of-allocation-register) '())))]))))
   (define Pred
     (lambda (p)
       (match p
@@ -1689,6 +1718,7 @@
                        ,return-address-register
                        ,allocation-pointer-register
                        ,stack-base-register
+                       ,@(if *collection-enabled* (list end-of-allocation-register) '())
                        ,@(map cadr fill-register) ,@(map cadr fill-new-frame)))))]
         [(set! ,uvar (,proc ,args* ...)) (guard
                                            (not (binop? proc))
@@ -1762,7 +1792,7 @@
                          (let ([entry (assq vv graph)])
                            (set-cdr! entry (liveset-cons v (cdr entry))))))
                    (add-v (cdr vv*)))))])
-    (define call-live #f)
+    (define call-live)
     (define Program
       (lambda (p)
         (match p
@@ -2037,7 +2067,7 @@
            (apply append u u*))]
         [(,triv ,loc* ...)
          (if (integer? triv)
-             (let ([temp (unique-name 't)])
+             (let ([temp (unique-name 'u)])
                (values `(begin (set! ,temp ,triv) (,temp ,loc*))
                  (list temp)))
              (values t '()))])))
@@ -2052,23 +2082,23 @@
            (apply append u u*))]
         [(,rel ,x ,y)
          (cond [(and (frame-var? x) (frame-var? y))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (values `(begin (set! ,temp ,x) (,rel ,temp ,y))
                     (list temp)))]
                [(or (label? x)
                     (and (integer? x)
                          (not (int32? x))))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(p^ u) (Pred `(begin (set! ,temp ,x) (,rel ,temp ,y)))])
                     (values p^ (cons temp u))))]
                [(or (label? y)
                     (and (integer? y)
                          (not (int32? y))))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(p^ u) (Pred `(begin (set! ,temp ,y) (,rel ,x ,temp)))])
                     (values p^ (cons temp u))))]
                [(and (integer? x) (integer? y)) ; yes we can do better but just leave it to PE
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (values `(begin (set! ,temp ,x) (,rel ,temp ,y))
                     (list temp)))]
                [(integer? x) (values `(,(flip-relop rel) ,y ,x) '())]
@@ -2088,7 +2118,7 @@
         [(nop) (values '(nop) '())]
         [(mset! ,base ,offset ,expr)
          (cond [(not (very-trivial? expr))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(eff u)
                                 (Effect `(begin (set! ,temp ,expr)
                                                 (mset! ,base ,offset ,temp)))])
@@ -2098,20 +2128,20 @@
                      (or (not (int32? base)) (not (int32? offset))))
                 (values e '())]
                [(very-trivial? base)
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(eff u) (Effect `(mset! ,base ,temp ,expr))])
                     (values
                       (make-begin (cons `(set! ,temp ,offset) (list eff)))
                       (cons temp u))))]
                [else
-                 (let ([temp (unique-name 't)])
+                 (let ([temp (unique-name 'u)])
                    (let-values ([(eff u) (Effect `(mset! ,temp ,offset ,expr))])
                      (values
                        (make-begin (cons `(set! ,temp ,base) (list eff)))
                        (cons temp u))))])]
         [(set! ,v (mref ,base ,offset))
          (cond [(frame-var? v)
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(eff u) (Effect `(set! ,temp (mref ,base ,offset)))])
                     (values
                       (make-begin (cons eff `((set! ,v ,temp))))
@@ -2121,20 +2151,20 @@
                      (or (not (int32? base)) (not (int32? offset))))
                 (values e '())]
                [(very-trivial? base)
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (let-values ([(eff u) (Effect `(set! ,v (mref ,base ,temp)))])
                     (values
                       (make-begin (cons `(set! ,temp ,offset) (list eff)))
                       (cons temp u))))]
                [else
-                 (let ([temp (unique-name 't)])
+                 (let ([temp (unique-name 'u)])
                    (let-values ([(eff u) (Effect `(set! ,v (mref ,temp ,offset)))])
                      (values
                        (make-begin (cons `(set! ,temp ,base) (list eff)))
                        (cons temp u))))])]
         [(set! ,v (,rator ,v ,x))
          (cond [(and (eq? rator '*) (frame-var? v))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (values `(begin (set! ,temp ,x)
                                   (set! ,temp (* ,temp ,v))
                                   (set! ,v ,temp))
@@ -2142,7 +2172,7 @@
                [(or (label? x)
                     (and (int64? x) (not (int32? x)))
                     (and (frame-var? v) (frame-var? x)))
-                (let ([temp (unique-name 't)])
+                (let ([temp (unique-name 'u)])
                   (values `(begin (set! ,temp ,x)
                                   (set! ,v (,rator ,v ,temp)))
                     (list temp)))]
@@ -2157,36 +2187,33 @@
                                          (or (uvar? y) (register? y))))) ; chance to coalesce
                            (values y x)
                            (values x y))])
-           (let ([temp (unique-name 't)])
-             (let-values ([(e^ u)
-                           (Effect `(begin (set! ,v ,f)
-                                           (set! ,v (,rator ,v ,s))))])
-               (values e^ (cons temp u)))))]
+           (let-values ([(e^ u)
+                         (Effect `(begin (set! ,v ,f)
+                                         (set! ,v (,rator ,v ,s))))])
+             (values e^ u)))]
         [(set! ,fv (,rator ,x ,y))
          (cond [(and (not (eq? rator '*))
                      (very-trivial? x)
                      (not (eq? fv y))) ; otherwise not sound
-                (let ([temp (unique-name 't)])
-                  (let-values ([(e^ u)
-                                (Effect `(begin (set! ,fv ,x)
-                                                (set! ,fv (,rator ,fv ,y))))])
-                    (values e^ (cons temp u))))]
+                (let-values ([(e^ u)
+                              (Effect `(begin (set! ,fv ,x)
+                                              (set! ,fv (,rator ,fv ,y))))])
+                  (values e^ u))]
                [(and (not (eq? rator '*))
                      (commutative? rator)
                      (very-trivial? y))
-                (let ([temp (unique-name 't)])
-                  (let-values ([(e^ u)
-                                (Effect `(begin (set! ,fv ,y)
-                                                (set! ,fv (,rator ,fv ,x))))])
-                    (values e^ (cons temp u))))]
+                (let-values ([(e^ u)
+                              (Effect `(begin (set! ,fv ,y)
+                                              (set! ,fv (,rator ,fv ,x))))])
+                  (values e^ u))]
                [else
-                 (let ([temp (unique-name 't)])
+                 (let ([temp (unique-name 'u)])
                    (let-values ([(e^ u)
                                  (Effect `(begin (set! ,temp (,rator ,x ,y))
                                                  (set! ,fv ,temp)))])
                      (values e^ (cons temp u))))])]
         [(set! ,v ,x) (cond [(and (frame-var? v) (not-so-trivial? x))
-                             (let ([temp (unique-name 't)])
+                             (let ([temp (unique-name 'u)])
                                (values `(begin (set! ,temp ,x) (set! ,v ,temp))
                                  (list temp)))]
                             [else (values e '())])])))
@@ -2306,7 +2333,7 @@
 
 (define-who assign-registers-coalesce
   (define K (length registers))
-  (define ulocals #f)
+  (define ulocals)
   (define remq*
     (lambda (x tr)
       (cond [(null? tr) '()]
@@ -2895,7 +2922,7 @@
   Program)
 
 (define-who optimize-jumps
-  (define graph #f)
+  (define graph)
   (define trace-graph
     (lambda (start)
       (cond [(assq start graph) =>
@@ -3075,6 +3102,12 @@
                                  (length *all-code-size*)))))))
 
 (define label-alias)
+(define number-of-free)
+
+(define label->x86-64-label
+  (lambda (lab)
+    (cond [(assq lab label-alias) => cadr]
+          [else (format "L~a" (extract-suffix lab))])))
 
 (define-syntax emit-jump
   (syntax-rules ()
@@ -3088,6 +3121,7 @@
   (syntax-rules ()
     [(_ code code* ...)
      (begin
+       (emit '.text)
        (emit '.globl "_scheme_entry")
        (emit-label "_scheme_entry")
        (emit 'pushq 'rbx)
@@ -3123,23 +3157,24 @@
                              (Statement (car s))
                              (emit* (cdr s))))])
            (emit-static-data data*)
-           (emit '.text)
            (emit-program (emit* stmt*)))])))
-  (define Label
-    (lambda (lab)
-      (cond [(assq lab label-alias) => cadr]
-            [else lab])))
   (define Statement
     (lambda (s)
       (match s
-        [,label (guard (label? label)) (emit-label label)]
-        [(jump ,dst) (emit-jump 'jmp (Label dst))]
+        [,label (guard (label? label))
+          (cond [(assq label number-of-free) =>
+                 (lambda (n)
+                   (emit '.data)
+                   (printf "    .quad  ~a\n" (ash (cadr n) shift-fixnum))
+                   (emit '.text))])
+          (emit-label label)]
+        [(jump ,dst) (emit-jump 'jmp dst)]
         [(if (,rel ,x ,y) (jump ,dst))
          (emit 'cmpq y x)
-         (emit-jump (rel->assembly rel) (Label dst))]
+         (emit-jump (rel->assembly rel) dst)]
         [(if (not (,rel ,x ,y)) (jump ,dst))
          (emit 'cmpq y x)
-         (emit-jump (not-rel->assembly rel) (Label dst))]
+         (emit-jump (not-rel->assembly rel) dst)]
         [(set! ,v1 (,rator ,v1 ,v2))
          (emit (binop->assembly rator) v2 v1)]
         [(set! ,v1 ,v2) (if (label? v2)
@@ -3209,9 +3244,11 @@
     (define Data
       (lambda (data)
         (match data
+          [(label-alias ,alias) (set! label-alias alias)]
+          [(number-of-free ,nfv) (set! number-of-free nfv)]
           [(symbol-dump ((quote ,sym*) ...))
-           (emit '.global "_symbol_dump")
-           (emit-label "_symbol_dump")
+           (emit '.global "_scheme_symbol_dump")
+           (emit-label "_scheme_symbol_dump")
            (if (null? sym*)
                (emit '.ascii "\"\"")
                (begin
@@ -3224,7 +3261,11 @@
                    sym*)
                  (sweep)
                  (printf "\n")))]
-          [(label-alias ,alias) (set! label-alias alias)]
+          [(number-of-roots ,n)
+           (emit '.global "_scheme_roots")
+           (emit-label "_scheme_roots")
+           (printf "    .quad ~a\n" (ash n shift-fixnum))
+           (printf "    .zero ~a\n" (ash n align-shift))]
           [(,lab (encode-literal (quote ,complex)))
            (emit-label lab)
            (printf "    .quad ")
@@ -3291,22 +3332,94 @@
 
 (trusted-passes #t)
 
+;; special non-trivial tests
+
+(define long `,(list 'quote tests))
+
+(define normalizer
+  '(letrec
+       ([assq
+          (lambda (x l)
+            (if (null? l) #f
+                (if (eq? (car (car l)) x)
+                    (car l)
+                    (assq x (cdr l)))))]
+        [val1
+          (lambda (e env)
+            (if (symbol? e)
+                (cdr (assq e env))
+                (if (eq? (car e) 'quote)
+                    (car (cdr e))
+                    (if (eq? (car e) 'lambda)
+                        (lambda (arg)
+                          (val1
+                            (car (cdr (cdr e)))
+                            (cons (cons (car (car (cdr e))) arg) env)))
+                        ((val1 (car e) env)
+                         (val1 (car (cdr e)) env))))))]
+        [val
+          (lambda (e) (val1 e '()))]
+        [uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
+        [c 0]
+        [newvar
+          (lambda ()
+            (set! c (+ c 1))
+            (letrec ([locate
+                       (lambda (i l)
+                         (if (eq? i 1)
+                             (car l)
+                             (locate (- i 1) (cdr l))))])
+              (locate c uvars)))]
+        [created-neutral '()]
+        [neutral?1
+          (lambda (x l)
+            (if (null? l) #f
+                (if (eq? (car (car l)) x)
+                    (cdr (car l))
+                    (neutral?1 x (cdr l)))))]
+        [neutral?
+          (lambda (x) (neutral?1 x created-neutral))]
+        [create-neutral
+          (lambda (e)
+            (letrec ([ne (lambda (y)
+                           (create-neutral (cons ne y)))])
+              (set! created-neutral (cons (cons ne e) created-neutral))
+              ne))]
+        [read-back
+          (lambda (e)
+            (if (neutral? e)
+                (let ([app (neutral? e)])
+                  (if (symbol? app) app
+                      (let ([rator (car app)]
+                            [rand (cdr app)])
+                        (cons (read-back rator)
+                          (cons (read-back rand) '())))))
+                (if (procedure? e)
+                    (let ([v (newvar)])
+                      (let ([ne (create-neutral v)])
+                        (cons 'lambda
+                          (cons (cons v '())
+                            (cons (read-back (e ne)) '())))))
+                    (cons 'quote (cons e '())))))]
+        [normalize (lambda (e) (read-back (val e)))])
+     (normalize '(lambda (x) (lambda (y) (x y))))))
+
 (define yin-yang
-  '(let ([count 20]
+  '(let ([count 50]
          [res '()])
      (let ([yin
              ((lambda (cc)
-                (set! res (cons 1 res))
+                (set! res (cons '! res))
                 (set! count (- count 1))
-                (if (eq? count 0)
+                (if (= count 0)
                     (lambda (x) res)
                     cc))
               (call/cc (lambda (c) c)))])
        (let ([yang
                ((lambda (cc)
-                  (set! res (cons 0 res))
+                  (set! res (cons '- res))
                   (set! count (- count 1))
-                  (if (eq? count 0)
+                  (if (= count 0)
                       (lambda (x) res)
                       cc))
                 (call/cc (lambda (c) c)))])

@@ -19,10 +19,10 @@
 #define SCHEME_ENTRY _scheme_entry
 #endif
 
-#define SYMBOL_TO_ADDR _symbol_to_address
+#define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
 extern long SCHEME_ENTRY(char *, char *);
-extern char *SYMBOL_TO_ADDR(long);
+extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
 
 /* locally defined functions */
 static char *guarded_area(long n);
@@ -287,7 +287,7 @@ static void print1(ptr x, int d) {
   } else if (x == _void) {
     printf("#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
-    printf("%s", SYMBOL_TO_ADDR(x));
+    printf("%s", SCHEME_SYMBOL_TO_ADDRESS(x));
   }
 }
 
@@ -302,3 +302,13 @@ static void print(long x) {
 } 
 
 #endif /* SCHEME_PRINTER */
+
+/* GC */
+#define continuation_special_flag (-1)
+#define continuation_disp_stack_size (14)
+#define continuation_disp_stack (22)
+#define SCHEME_ROOTs _scheme_roots
+#define root_disp_length (0)
+#define root_disp_roots (8)
+
+
