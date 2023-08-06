@@ -18,10 +18,9 @@
 (define *max-inline-literal-size* 0)
 (define *collection-enabled* #f)
 
+(define disp-root-globals (ash (length registers) align-shift))
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
-(define root-disp-length 0)
-(define root-disp-roots 8)
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
 
@@ -211,6 +210,59 @@
             [else (let ([tmp (unique-name 'tmp)])
                     `(let ([,tmp ,(car rand*)])
                        (if ,tmp ,tmp ,(convert-or (cdr rand*)))))])))
+  (define convert-cond
+    (lambda (clause* env)
+      (cond [(null? clause*) '(void)]
+            [else (let* ([cls (car clause*)]
+                         [cond (car cls)]
+                         [body* (map (Expr env) (cdr cls))])
+                    (if (and (eq? cond 'else)
+                             (not (assq 'else env)))
+                        `(begin ,@body*)
+                        `(if ,((Expr env) cond)
+                             (begin ,@body*)
+                             ,(convert-cond (cdr clause*) env))))])))
+  (define convert-quasiquote
+    (lambda (qd env)
+      (define unchanged
+        (lambda (qd expr)
+          (and (pair? expr)
+               (eq? (car expr) 'quote)
+               (eq? qd (cadr expr)))))
+      (cond [(and (pair? qd)
+                  (eq? (car qd) 'unquote)
+                  (not (assq 'unquote env)))
+             ((Expr env) (cadr qd))]
+            [(pair? qd)
+             (let ([a (car qd)]
+                   [d (cdr qd)])
+               (let ([a^ (convert-quasiquote a env)]
+                     [d^ (convert-quasiquote d env)])
+                 (if (and (unchanged a a^) (unchanged d d^))
+                     `(quote ,qd)
+                     `(cons ,a^ ,d^))))]
+            [(vector? qd)
+             (let ([qd^ (vector-map (lambda (qd) (convert-quasiquote qd env)) qd)]
+                   [length (vector-length qd)])
+               (if (let loop ([i 0])
+                     (if (= i length)
+                         #t
+                         (and (unchanged (vector-ref qd i) (vector-ref qd^ i))
+                              (loop (add1 i)))))
+                   `(quote ,qd)
+                   (let* ([tmp (unique-name 'tmp)]
+                          [fill
+                            (let loop ([i 0])
+                              (if (< i length)
+                                  (cons
+                                    `(vector-set! ,tmp (quote ,i) ,(vector-ref qd^ i))
+                                    (loop (add1 i)))
+                                  '()))])
+                     `(let ([,tmp (make-vector (quote ,length))])
+                        (begin ,@fill ,tmp)))))]
+            [else
+              (check-datum qd)
+              `(quote ,qd)])))
   (define Var
     (lambda (env)
       (lambda (var)
@@ -234,6 +286,7 @@
           [(quote ,datum)
            (check-datum datum)
            `(quote ,datum)]
+          [(quasiquote ,quasidatum) (convert-quasiquote quasidatum env)]
           [(call/cc ,[(Expr env) -> expr]) `(call/cc ,expr)]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq])
            `(if ,cond ,conseq (void))]
@@ -242,6 +295,19 @@
           [(and ,[(Expr env) -> rand*] ...) (convert-and rand*)]
           [(or ,[(Expr env) -> rand*] ...) (convert-or rand*)]
           [(not ,[(Expr env) -> rand]) `(if ,rand (quote #f) (quote #t))]
+          [(cond ,clause* ...) (convert-cond clause* env)]
+          [(caar ,[(Expr env) -> expr]) `(car (car ,expr))]
+          [(cadr ,[(Expr env) -> expr]) `(car (cdr ,expr))]
+          [(cdar ,[(Expr env) -> expr]) `(cdr (car ,expr))]
+          [(cddr ,[(Expr env) -> expr]) `(cdr (cdr ,expr))]
+          [(caaar ,[(Expr env) -> expr]) `(car (car (car ,expr)))]
+          [(caadr ,[(Expr env) -> expr]) `(car (car (cdr ,expr)))]
+          [(cadar ,[(Expr env) -> expr]) `(car (cdr (car ,expr)))]
+          [(cdaar ,[(Expr env) -> expr]) `(cdr (car (car ,expr)))]
+          [(caddr ,[(Expr env) -> expr]) `(car (cdr (cdr ,expr)))]
+          [(cdadr ,[(Expr env) -> expr]) `(cdr (car (cdr ,expr)))]
+          [(cddar ,[(Expr env) -> expr]) `(cdr (cdr (car ,expr)))]
+          [(cdddr ,[(Expr env) -> expr]) `(cdr (cdr (cdr ,expr)))]
           [(begin ,[(Expr env) -> expr*] ... ,[(Expr env) -> expr]) `(begin ,expr* ... ,expr)]
           [(set! ,var ,[(Expr env) -> expr])
            (if (not (symbol? var))
@@ -315,7 +381,7 @@
   (define do-conversion
     (lambda (const)
       (cond
-        [(and (pair? const) (not (null? const)))
+        [(and (pair? const))
          `(cons
             ,(do-conversion (car const))
             ,(do-conversion (cdr const)))]
@@ -350,7 +416,7 @@
          (if (and (or (pair? imm) (vector? imm))
                   (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
              (let ([imm^ (do-conversion imm)])
-               (cond [(and (pair? imm) (not (null? imm)))
+               (cond [(and (pair? imm))
                       (let ([tmp (unique-name 'tmp)])
                         (set! bindings (cons `(,tmp ,imm^) bindings))
                         tmp)]
@@ -982,7 +1048,7 @@
   (lambda (p) (if *closure-optimization-enabled* ((Expr #f #f) p) p)))
 
 (define-who introduce-procedure-primitives
-  (define number-of-free)
+  (define closure-length) ; actually free-variable length
   (define index-of
     (lambda (x fvs)
       (let loop ([fv fvs] [i 0])
@@ -1000,7 +1066,7 @@
       (lambda (c)
         (match c
           [(,uvar ,lab ,[(Expr cp fvs) -> fv*] ...)
-           (set! number-of-free (cons (list lab (length fv*)) number-of-free))
+           (set! closure-length (cons (list lab (ash (length fv*) align-shift)) closure-length))
            (let ([set-free (let loop ([fv fv*] [i 0])
                              (cond [(null? fv) '()]
                                    [else (cons `(procedure-set! ,uvar (quote ,i) ,(car fv))
@@ -1036,9 +1102,9 @@
                   [else x])]
           [,lab (guard (label? lab)) lab]))))
   (lambda (x)
-    (set! number-of-free '())
+    (set! closure-length '())
     (let ([x^ ((Expr #f '()) x)])
-      `(let ([number-of-free ,number-of-free])
+      `(let ([closure-length ,closure-length])
          ,x^))))
 
 (define-who lift-letrec
@@ -1151,7 +1217,7 @@
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
   (define call/cc-label)
-  (define current-length)
+  (define current-dump-length)
   (define symbol->index)
   (define label-complex-disp*)
   (define root-label)
@@ -1279,22 +1345,24 @@
             [(symbol? i)
              (cond [(assq i symbol->index) =>
                     (lambda (index) (+ tag-symbol (ash (cdr index) shift-fixnum)))]
-                   [else (let ([index current-length])
+                   [else (let ([index current-dump-length])
                            (set! symbol->index (cons (cons i index) symbol->index))
-                           (set! current-length
-                             (+ current-length (add1 (string-length (symbol->string i)))))
+                           (set! current-dump-length
+                             (+ current-dump-length (add1 (string-length (symbol->string i)))))
                            (+ tag-symbol (ash index shift-fixnum)))])]
             [(integer? i) (ash i shift-fixnum)]
             [else
-              (let ([lab (unique-label 'complex)])
+              (let ([lab (unique-label 'complex)]
+                    [disp (+ disp-root-globals
+                            (ash n-complex align-shift))])
                 (set! label-complex-disp*
                   (cons
-                    (list lab (specify-complex i) (ash n-complex align-shift))
+                    (list lab (specify-complex i) disp)
                     label-complex-disp*))
                 (set! n-complex (add1 n-complex))
-                `(mref ,root-label ,(ash (sub1 n-complex) align-shift)))])))
+                `(mref ,root-label ,disp))])))
   (lambda (p)
-    (set! current-length 0)
+    (set! current-dump-length 0)
     (set! symbol->index '())
     (set! label-complex-disp* '())
     (set! call/cc-label (unique-label 'call/cc))
@@ -1314,7 +1382,8 @@
                                  (,call/cc-label "_scheme_call_with_current_continuation")
                                  (,root-label "_scheme_roots"))]
                    [,lab* (encode-literal (quote ,complex*))] ...
-                   [number-of-roots ,(+ (length registers) n-complex)]
+                   [roots-length ,(+ disp-root-globals (ash n-complex align-shift))]
+                   ;; prepared for registers (all registers are saved on collection as root)
                    ,data* ...)
                (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
                  (begin (,l* ,lab* ,disp*) ...
@@ -3102,7 +3171,7 @@
                                  (length *all-code-size*)))))))
 
 (define label-alias)
-(define number-of-free)
+(define closure-length)
 
 (define label->x86-64-label
   (lambda (lab)
@@ -3162,10 +3231,10 @@
     (lambda (s)
       (match s
         [,label (guard (label? label))
-          (cond [(assq label number-of-free) =>
+          (cond [(assq label closure-length) =>
                  (lambda (n)
                    (emit '.data)
-                   (printf "    .quad  ~a\n" (ash (cadr n) shift-fixnum))
+                   (printf "    .quad  ~a\n" (cadr n))
                    (emit '.text))])
           (emit-label label)]
         [(jump ,dst) (emit-jump 'jmp dst)]
@@ -3182,6 +3251,7 @@
                             (emit 'movq v2 v1))])))
   Program)
 
+;; needs documentation
 (define emit-static-data
   (let ([buffer #f]
         [size #f]
@@ -3245,7 +3315,7 @@
       (lambda (data)
         (match data
           [(label-alias ,alias) (set! label-alias alias)]
-          [(number-of-free ,nfv) (set! number-of-free nfv)]
+          [(closure-length ,nfv) (set! closure-length nfv)]
           [(symbol-dump ((quote ,sym*) ...))
            (emit '.global "_scheme_symbol_dump")
            (emit-label "_scheme_symbol_dump")
@@ -3261,11 +3331,11 @@
                    sym*)
                  (sweep)
                  (printf "\n")))]
-          [(number-of-roots ,n)
+          [(roots-length ,n)
            (emit '.global "_scheme_roots")
            (emit-label "_scheme_roots")
-           (printf "    .quad ~a\n" (ash n shift-fixnum))
-           (printf "    .zero ~a\n" (ash n align-shift))]
+           (printf "    .quad ~a\n" n)
+           (printf "    .zero ~a\n" n)]
           [(,lab (encode-literal (quote ,complex)))
            (emit-label lab)
            (printf "    .quad ")
@@ -3346,19 +3416,13 @@
                     (assq x (cdr l)))))]
         [val1
           (lambda (e env)
-            (if (symbol? e)
-                (cdr (assq e env))
-                (if (eq? (car e) 'quote)
-                    (car (cdr e))
-                    (if (eq? (car e) 'lambda)
-                        (lambda (arg)
-                          (val1
-                            (car (cdr (cdr e)))
-                            (cons (cons (car (car (cdr e))) arg) env)))
-                        ((val1 (car e) env)
-                         (val1 (car (cdr e)) env))))))]
-        [val
-          (lambda (e) (val1 e '()))]
+            (cond [(symbol? e) (cdr (assq e env))]
+                  [(eq? (car e) 'quote) (cadr e)]
+                  [(eq? (car e) 'lambda)
+                   (lambda (arg)
+                     (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
+                  [else ((val1 (car e) env) (val1 (cadr e) env))]))]
+        [val (lambda (e) (val1 e '()))]
         [uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
         [c 0]
         [newvar
@@ -3373,10 +3437,9 @@
         [created-neutral '()]
         [neutral?1
           (lambda (x l)
-            (if (null? l) #f
-                (if (eq? (car (car l)) x)
-                    (cdr (car l))
-                    (neutral?1 x (cdr l)))))]
+            (cond [(null? l) #f]
+                  [(eq? (caar l) x) (cdar l)]
+                  [else (neutral?1 x (cdr l))]))]
         [neutral?
           (lambda (x) (neutral?1 x created-neutral))]
         [create-neutral
@@ -3387,20 +3450,17 @@
               ne))]
         [read-back
           (lambda (e)
-            (if (neutral? e)
-                (let ([app (neutral? e)])
-                  (if (symbol? app) app
-                      (let ([rator (car app)]
-                            [rand (cdr app)])
-                        (cons (read-back rator)
-                          (cons (read-back rand) '())))))
-                (if (procedure? e)
-                    (let ([v (newvar)])
-                      (let ([ne (create-neutral v)])
-                        (cons 'lambda
-                          (cons (cons v '())
-                            (cons (read-back (e ne)) '())))))
-                    (cons 'quote (cons e '())))))]
+            (cond [(neutral? e)
+                   (let ([app (neutral? e)])
+                     (if (symbol? app) app
+                         (let ([rator (car app)]
+                               [rand (cdr app)])
+                           `(,(read-back rator) ,(read-back rand)))))]
+                  [(procedure? e)
+                   (let ([v (newvar)])
+                     (let ([ne (create-neutral v)])
+                       `(lambda (,v) ,(read-back (e ne)))))]
+                  [else `',e]))]
         [normalize (lambda (e) (read-back (val e)))])
      (normalize '(lambda (x) (lambda (y) (x y))))))
 

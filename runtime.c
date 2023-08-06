@@ -304,11 +304,13 @@ static void print(long x) {
 #endif /* SCHEME_PRINTER */
 
 /* GC */
+#define disp_closure_size (-8)
 #define continuation_special_flag (-1)
 #define continuation_disp_stack_size (14)
 #define continuation_disp_stack (22)
-#define SCHEME_ROOTs _scheme_roots
-#define root_disp_length (0)
-#define root_disp_roots (8)
-
+#define SCHEME_ROOTS _scheme_roots
+#define disp_root_length (0)
+#define disp_root_roots (8)
+#define disp_frame_size (-8)
+#define disp_live_mask_end (-16)
 
