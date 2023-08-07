@@ -21,7 +21,7 @@
 
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
-extern long SCHEME_ENTRY(char *, char *);
+extern long SCHEME_ENTRY(char *, char *, char *);
 extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
 
 /* locally defined functions */
@@ -107,7 +107,7 @@ int main(int argc, char *argv[]) {
   }
 
  /* run the Scheme program and print the result */
-  print(SCHEME_ENTRY(stack, heap));
+  print(SCHEME_ENTRY(stack, heap, heap + heap_size));
   printf("\n");
 
   return 0;

@@ -1,4 +1,4 @@
-; todo: add end-of-allocation-register; put ra to stack; insert overflow checking; computing live-mask; add interrupt-return-point; gc itself
+; todo: insert overflow checking; computing live-mask; add interrupt-return-point; gc itself
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -21,6 +21,7 @@
 (define disp-root-globals (ash (length registers) align-shift))
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
+(define return-address-location 'fv0)
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
 
@@ -177,9 +178,9 @@
   (define check-bind-variable
     (lambda (var* e)
       (cond [(not (for-all symbol? var*))
-             (format-error who "invalid expression to bind in ~s" e)]
+             (format-error who "invalid bound variable in ~s" e)]
             [(not (set? var*))
-             (format-error who "repetition in variables to bind in ~s" e)]
+             (format-error who "duplicate bound variable in ~s" e)]
             [else (void)])))
   (define check-datum
     (lambda (d)
@@ -191,7 +192,7 @@
             [(integer? d)
              (unless (and (exact? d)
                           (fixnum-range? d))
-               (format-error who "integer ~s is out of bound" d))]
+               (format-error who "~s is not a fixnum" d))]
             [(boolean? d) (void)]
             [(null? d) (void)]
             [(symbol? d) (void)]
@@ -268,7 +269,7 @@
       (lambda (var)
         (cond [(assq var env) => cdr]
               [(user-primitive? var) var]
-              [else (format-error who "unbound variable ~s" var)]))))
+              [else (format-error who "variable ~s is not bound" var)]))))
   (define Expr
     (lambda (env)
       (lambda (x)
@@ -282,7 +283,7 @@
           [(,prim ,[(Expr env) -> rand*] ...) (guard (user-primitive? prim))
            (if (= (user-primitive->arity prim) (length rand*))
                `(,prim ,rand* ...)
-               (format-error who "wrong number of operands in ~s" x))]
+               (format-error who "incorrect argument count in call ~s" x))]
           [(quote ,datum)
            (check-datum datum)
            `(quote ,datum)]
@@ -311,24 +312,24 @@
           [(begin ,[(Expr env) -> expr*] ... ,[(Expr env) -> expr]) `(begin ,expr* ... ,expr)]
           [(set! ,var ,[(Expr env) -> expr])
            (if (not (symbol? var))
-               (format-error who "setting a non-variable expression in ~s" x)
+               (format-error who "invalid syntax ~s" x)
                `(set! ,((Var env) var) ,expr))]
           [(lambda (,formal* ...) ,expr* ...)
-           (if (<= (length expr*) 0) (format-error who "empty body in ~s" x)) ; can improve
+           (if (<= (length expr*) 0) (format-error who "invalid syntax ~s" x)) ; can improve
            (check-bind-variable formal* x)
            (let* ([uvar* (map unique-name formal*)]
                   [env^ (append (map cons formal* uvar*) env)]
                   [body* (map (Expr env^) expr*)])
              `(lambda (,uvar* ...) (begin ,body* ...)))]
           [(let ([,var* ,[(Expr env) -> expr*]] ...) ,body* ...)
-           (if (<= (length body*) 0) (format-error who "empty body in ~s" x))
+           (if (<= (length body*) 0) (format-error who "invalid syntax ~s" x))
            (check-bind-variable var* x)
            (let* ([uvar* (map unique-name var*)]
                   [env^ (append (map cons var* uvar*) env)]
                   [body*^ (map (Expr env^) body*)])
              `(let ([,uvar* ,expr*] ...) (begin ,body*^ ...)))]
           [(letrec ([,var* ,expr*] ...) ,body* ...)
-           (if (<= (length body*) 0) (format-error who "empty body in ~s" x))
+           (if (<= (length body*) 0) (format-error who "invalid syntax ~s" x))
            (check-bind-variable var* x)
            (let* ([uvar* (map unique-name var*)]
                   [env^ (append (map cons var* uvar*) env)]
@@ -339,7 +340,7 @@
           [,x (format-error who "invalid expression ~s" x)]))))
   (lambda (p) ((Expr '()) p)))
 
-(define-who convert-primitive
+(define-who proceduralize-primitive
   (define bindings)
   (define Expr
     (lambda (e)
@@ -1694,7 +1695,7 @@
   (define fetch-arguments
     (lambda (args which)
       (cond [(null? args) '()]
-            [(null? which) (fetch-arguments args 0)]
+            [(null? which) (fetch-arguments args 1)]
             [(integer? which)
              (cons `(set! ,(car args) ,(index->frame-var which))
                (fetch-arguments (cdr args) (+ which 1)))]
@@ -1724,8 +1725,9 @@
              (let ([prologue (cons `(set! ,rp ,return-address-register)
                                (fetch-arguments parameter parameter-registers))])
                `(locals (,uvar* ... ,rp ,parameter ... ,new-frames ... ...)
-                  (new-frames ,new-frames
-                    (begin ,@prologue ,tail))))])))))
+                  (with-return-point ,rp
+                    (new-frames ,new-frames
+                      (begin ,@prologue ,tail)))))])))))
   (define Tail
     (lambda (rp)
       (lambda (t)
@@ -1739,7 +1741,7 @@
            (let* ([in-register (take (length parameter-registers) rand*)]
                   [in-frame (drop (length parameter-registers) rand*)]
                   [fill-register (fill-arguments in-register parameter-registers)]
-                  [fill-frame (fill-arguments in-frame 0)])
+                  [fill-frame (fill-arguments in-frame 1)])
              `(begin ,@fill-frame
                      ,@fill-register
                      (set! ,return-address-register ,rp)
@@ -1812,8 +1814,12 @@
   (define Body
     (lambda (b)
       (match b
-        [(locals (,uvar* ...) (new-frames (,nfv* ...) ,[Tail -> tail]))
-         `(locals (,uvar* ...) (new-frames (,nfv* ...) ,tail))])))
+        [(locals (,uvar* ...)
+           (with-return-point ,rp
+             (new-frames (,nfv* ...) ,[Tail -> tail])))
+         `(locals (,uvar* ...)
+            (with-return-point ,rp
+              (new-frames (,nfv* ...) ,tail)))])))
   (define Tail
     (lambda (t)
       (match t
@@ -1871,16 +1877,19 @@
       (lambda (b)
         (set! call-live '())
         (match b
-          [(locals (,uvar* ...) (new-frames (,nfv* ...) ,tail))
+          [(locals (,uvar* ...)
+             (with-return-point ,rp
+               (new-frames (,nfv* ...) ,tail)))
            (set! graph
              (map (lambda (x) (list x)) uvar*))
            (Tail tail)
            (let ([spill (filter uvar? call-live)])
              `(locals ,(difference uvar* spill)
-                (new-frames (,nfv* ...)
-                  (spills ,spill
-                    (frame-conflict ,graph
-                      (call-live ,call-live ,tail))))))])))
+                (with-return-point ,rp
+                  (new-frames (,nfv* ...)
+                    (spills ,spill
+                      (frame-conflict ,graph
+                        (call-live ,call-live ,tail)))))))])))
     (define Tail
       (letrec ([make-liveset
                  (lambda (loc)
@@ -1945,10 +1954,11 @@
     (lambda (b)
       (match b
         [(locals ,locs
-           (new-frames ,nfvs
-             (spills ,spill
-               (frame-conflict ,frame-conflict
-                 (call-live ,call-lives ,tail)))))
+           (with-return-point ,rp
+             (new-frames ,nfvs
+               (spills ,spill
+                 (frame-conflict ,frame-conflict
+                   (call-live ,call-lives ,tail))))))
          (letrec ([subst (lambda (l homes)
                            (cond [(null? l) '()]
                                  [(frame-var? (car l)) (cons (car l) (subst (cdr l) homes))]
@@ -1958,14 +1968,22 @@
                   [first-available (lambda (forbid)
                                      (let loop ([i 0])
                                        (let ([fv (index->frame-var i)])
-                                         (if (memq fv forbid) (loop (+ i 1)) fv))))])
+                                         (if (memq fv forbid) (loop (+ i 1)) fv))))]
+                  [first-except-rp
+                    (lambda (l)
+                      (cond [(null? (cdr l)) (car l)]
+                            [(eq? (car l) rp) (first-except-rp (cdr l))]
+                            [else (car l)]))])
            (let ([homes^
                    (let assign ([spill spill])
                      (if (null? spill) '()
-                         (let* ([home (assign (cdr spill))]
-                                [now (car spill)]
-                                [conflict (subst (assq now frame-conflict) home)])
+                         (let* ([now (first-except-rp spill)]
+                                [home (assign (remq now spill))]
+                                [conflict (subst (cdr (assq now frame-conflict)) home)])
                            (cons `(,now ,(first-available conflict)) home))))])
+             (let ([rp-home (assq rp homes^)])
+               (if (and rp-home (not (eq? (cadr rp-home) return-address-location)))
+                   (format-error who "unable to save return point properly")))
              `(locals ,locs
                 (new-frames ,nfvs
                   (locate ,homes^
@@ -1980,7 +1998,7 @@
                              (if (null? x) '()
                                  (cons `(,(car x) ,(index->frame-var (+ frame-size i)))
                                    (assign-one (cdr x) (+ i 1)))))])
-        (apply append (map (lambda (x) (assign-one x 0)) new-frames)))))
+        (apply append (map (lambda (x) (assign-one x 1)) new-frames)))))
   (define Body
     (lambda (b)
       (match b
@@ -2098,8 +2116,7 @@
   (define Var
     (lambda (map)
       (lambda (v)
-        (cond [(and (uvar? v) (assq v map)) =>
-               (lambda (x) (cdr x))]
+        (cond [(and (uvar? v) (assq v map)) => cdr]
               [else v]))))
   (define Triv Var)
   Program)
@@ -2688,7 +2705,7 @@
                      (if (null? spill) homes
                          (let* ([home (assign (cdr spill))]
                                 [now (car spill)]
-                                [conflict (subst (assq now frame-conflict) home)])
+                                [conflict (subst (cdr (assq now frame-conflict)) home)])
                            (cons `(,now ,(first-available conflict)) home))))])
              `(locals ,locs
                 (ulocals ,ulocs
@@ -3202,6 +3219,7 @@
        (emit 'movq 'rdi frame-pointer-register)
        (emit 'movq 'rdi stack-base-register)
        (emit 'movq 'rsi allocation-pointer-register)
+       (emit 'movq 'rdx end-of-allocation-register)
        (emit 'leaq "_scheme_exit(%rip)" return-address-register)
        code code* ...
        (emit-label "_scheme_exit")
@@ -3349,7 +3367,7 @@
 
 (compiler-passes '(
   parse-scheme
-  convert-primitive
+  proceduralize-primitive
   optimize-direct-call
   uncover-assigned
   purify-letrec
