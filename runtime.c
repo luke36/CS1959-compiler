@@ -19,9 +19,11 @@
 #define SCHEME_ENTRY _scheme_entry
 #endif
 
+#define SCHEME_EXIT _scheme_exit
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
 extern long SCHEME_ENTRY(char *, char *, char *);
+extern void SCHEME_EXIT(void);
 extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
 
 /* locally defined functions */
@@ -215,6 +217,12 @@ static void usage_error(char *who) {
 #define _nil 22
 #define _void 30
 
+#define disp_closure_size (-8)
+#define continuation_special_flag (-1)
+#define disp_continuation_return_address (8)
+#define disp_continuation_stack_size (16)
+#define disp_continuation_stack (24)
+
 typedef long ptr;
 
 #define UNFIX(x) (x >> shift_fixnum)
@@ -225,9 +233,19 @@ typedef long ptr;
 #define VECTORLENGTH(x) (*(ptr *)(UNTAG(x,tag_vector) + disp_vector_length))
 #define VECTORDATA(x) ((ptr *)(UNTAG(x,tag_vector) + disp_vector_data))
 
+#define PROCEDURECODE(x) (*(ptr *)(UNTAG(x,tag_procedure) + disp_procedure_code))
+#define CLOSURESIZE(x) (*(long *)((long)PROCEDURECODE(x) + disp_closure_size))
+#define CONTINUATIONRETURNADDRESS(x) \
+  (*(void **)(UNTAG(x,tag_procedure) + disp_continuation_return_address))
+#define CONTINUATIONSTACKSIZE(x) \
+  (*(long *)(UNTAG(x,tag_procedure) + disp_continuation_stack_size))
+#define CONTINUATIONSTACK(x) \
+  ((ptr *)(UNTAG(x,tag_procedure) + disp_continuation_stack))
+
 #define MAXDEPTH 100
 #define MAXLENGTH 1000
 
+void walk(void *ra, ptr *top);
 static void print1(ptr x, int d) {
   if (TAG(x, mask_fixnum) == tag_fixnum) {
     printf("%ld", (long)UNFIX(x));
@@ -292,7 +310,12 @@ static void print1(ptr x, int d) {
 }
 
 static void print(ptr x) {
-  print1(x, 0);
+  if (TAG(x, mask_procedure) == tag_procedure) {
+    int n = CLOSURESIZE(x);
+    if (n == continuation_special_flag)
+      walk(CONTINUATIONRETURNADDRESS(x), CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
+  } else
+    print1(x, 0);
 }
 
 #else /* SCHEME_PRINTER */
@@ -304,13 +327,35 @@ static void print(long x) {
 #endif /* SCHEME_PRINTER */
 
 /* GC */
-#define disp_closure_size (-8)
-#define continuation_special_flag (-1)
-#define continuation_disp_stack_size (14)
-#define continuation_disp_stack (22)
 #define SCHEME_ROOTS _scheme_roots
 #define disp_root_length (0)
 #define disp_root_roots (8)
 #define disp_frame_size (-8)
-#define disp_live_mask_end (-16)
+#define disp_live_mask_end (-8)
+
+#define FRAME_SIZE(x) (*(long *)((long)x + disp_frame_size))
+#define LIVE_MASK_END(x) ((char *)((long)x + disp_live_mask_end))
+#define ITH_LIVE(s, i) (*(s + (i - 1) / 8) & (1 << (i % 8)))
+
+void walk1(void *ra, ptr *top, int d) {
+  if (ra == SCHEME_EXIT)
+    return;
+  printf("---------------- STACK %d BEGIN ----------------\n", d);
+  long size = FRAME_SIZE(ra);
+  long nptr = UNFIX(size);
+  long nbyte = (nptr - 1) / 8 + 1;
+  char *mask_start = LIVE_MASK_END(ra) - nbyte;
+  ptr *bot = top - nptr;
+  for (long i = 1; i < nptr; i++)
+    if (ITH_LIVE(mask_start, i)) {
+      printf("var %ld: ", i);
+      print1(*(bot + i), 0);
+      printf("\n");
+    }
+  walk1((void *)bot[0], bot, d + 1);
+}
+
+void walk(void *ra, ptr *top) {
+  walk1(ra, top, 0);
+}
 

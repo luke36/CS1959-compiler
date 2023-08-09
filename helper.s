@@ -119,9 +119,7 @@ CALLCC_APPLY:
     addq %rcx, %rdx
     jmp *-2(%r8)
 
-    .data
     .quad -1
-    .text
 _scheme_invoke_continuation:
     movq 14(%r8), %rax
     movq %r14, %rbp
