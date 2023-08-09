@@ -1,4 +1,10 @@
-; todo: insert overflow checking; computing live-mask; add interrupt-return-point; gc itself
+;; todo: insert overflow checking; add trap-return-point; gc itself
+
+;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
+;; possible source in this compiler). however,
+;;   1. sra always appears as the second operand of *;
+;;   2. operands of * are computed in order.
+;; so this evil non-ptr is gone immediately and have no chance to be live on the frame.
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -1882,14 +1888,14 @@
                (new-frames (,nfv* ...) ,tail)))
            (set! graph
              (map (lambda (x) (list x)) uvar*))
-           (Tail tail)
-           (let ([spill (filter uvar? call-live)])
-             `(locals ,(difference uvar* spill)
-                (with-return-point ,rp
-                  (new-frames (,nfv* ...)
-                    (spills ,spill
-                      (frame-conflict ,graph
-                        (call-live ,call-live ,tail)))))))])))
+           (let-values ([(tail^ live) (Tail tail)])
+             (let ([spill (filter uvar? call-live)])
+               `(locals ,(difference uvar* spill)
+                  (with-return-point ,rp
+                    (new-frames (,nfv* ...)
+                      (spills ,spill
+                        (frame-conflict ,graph
+                          (call-live ,call-live ,tail^))))))))])))
     (define Tail
       (letrec ([make-liveset
                  (lambda (loc)
@@ -1897,51 +1903,67 @@
                          [else (liveset-cons (car loc) (make-liveset (cdr loc)))]))])
         (lambda (t)
           (match t
-            [(if ,cond ,[Tail -> c-l] ,[Tail -> a-l])
-             ((Pred c-l a-l) cond)]
-            [(begin ,effect* ... ,[Tail -> live])
-             ((Effect* live) effect*)]
+            [(if ,cond ,[Tail -> conseq c-l] ,[Tail -> alter a-l])
+             (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
+               (values `(if ,cond^ ,conseq ,alter) live))]
+            [(begin ,effect* ... ,[Tail -> tail live])
+             (let-values ([(eff*^ live^) ((Effect* live) effect*)])
+               (values `(begin ,eff*^ ... ,tail) live^))]
             [(,triv ,loc* ...)
-             (make-liveset (cons triv loc*))]))))
+             (values t (make-liveset (cons triv loc*)))]))))
     (define Pred
       (lambda (post-c post-a)
         (lambda (p)
           (match p
-            [(true) post-c]
-            [(false) post-a]
-            [(if ,cond ,[(Pred post-c post-a) -> c-l] ,[(Pred post-c post-a) -> a-l])
-             ((Pred c-l a-l) cond)]
-            [(begin ,effect* ... ,[(Pred post-c post-a) -> live])
-             ((Effect* live) effect*)]
+            [(true) (values p post-c)]
+            [(false) (values p post-a)]
+            [(if ,cond ,[(Pred post-c post-a) -> conseq c-l] ,[(Pred post-c post-a) -> alter a-l])
+             (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
+               (values `(if ,cond^ ,conseq ,alter) live))]
+            [(begin ,effect* ... ,[(Pred post-c post-a) -> pred live])
+             (let-values ([(eff*^ live^) ((Effect* live) effect*)])
+               (values `(begin ,eff*^ ... ,pred) live^))]
             [(,rel ,x ,y)
-             (liveset-cons x (liveset-cons y (union post-c post-a)))]))))
+             (values p (liveset-cons x (liveset-cons y (union post-c post-a))))]))))
     (define Effect
       (lambda (post)
         (lambda (e)
           (match e
-            [(nop) post]
-            [(return-point ,label ,[Tail -> live])
+            [(nop) (values e post)]
+            [(return-point ,label ,[Tail -> tail live])
              (set! call-live (union post call-live))
-             (union live post)]
-            [(if ,cond ,[(Effect post) -> c-l] ,[(Effect post) -> a-l])
-             ((Pred c-l a-l) cond)]
-            [(begin ,effect* ... ,[(Effect post) -> live])
-             ((Effect* live) effect*)]
+             (values `(return-point ,label ,post ,tail)
+               (union live post))] ; todo
+            [(if ,cond ,[(Effect post) -> conseq c-l] ,[(Effect post) -> alter a-l])
+             (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
+               (values `(if ,cond^ ,conseq ,alter) live))]
+            [(begin ,effect* ... ,[(Effect post) -> effect live])
+             (let-values ([(effect*^ live^) ((Effect* live) effect*)])
+               (values `(begin ,effect*^ ... ,effect) live^))]
+            [(mset! ,base ,offset (,rator ,x ,y))
+             (values e (liveset-cons base (liveset-cons offset (liveset-cons x (liveset-cons y post)))))]
             [(mset! ,base ,offset ,expr)
-             (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
+             (values e (liveset-cons base (liveset-cons offset (liveset-cons expr post))))]
             [(set! ,v (,rator ,x ,y))
-             (let ([post-rhs (difference post (list v))])
-               (add-conflict-list v post-rhs)
-               (liveset-cons x (liveset-cons y post-rhs)))]
+             (if (or (register? v) (memq v post))
+                 (let ([post-rhs (difference post (list v))])
+                   (add-conflict-list v post-rhs)
+                   (values e (liveset-cons x (liveset-cons y post-rhs))))
+                 (values '(nop) post))]
             [(set! ,v ,x)
-             (let ([post-rhs (difference post (list v))])
-               (add-conflict-list v (difference post-rhs (list x)))
-               (liveset-cons x post-rhs))]))))
+             (if (or (register? v) (memq v post))
+                 (let ([post-rhs (difference post (list v))])
+                   (add-conflict-list v (difference post-rhs (list x)))
+                   (values e (liveset-cons x post-rhs)))
+                 (values '(nop) post))]))))
     (define Effect*
       (lambda (post)
         (lambda (e*)
-          (cond [(null? e*) post]
-                [else ((Effect ((Effect* post) (cdr e*))) (car e*))]))))
+          (cond [(null? e*) (values '() post)]
+                [else
+                  (let*-values ([(e*^ post^) ((Effect* post) (cdr e*))]
+                                [(e^ post^^) ((Effect post^) (car e*))])
+                    (values (cons e^ e*^) post^^))]))))
     Program))
 
 (define-who pre-assign-frame
@@ -2036,11 +2058,11 @@
     (lambda (size)
       (lambda (e)
         (match e
-          [(return-point ,label ,tail)
+          [(return-point ,label ,live ,tail)
            (if (zero? size) e ; impossible though
                `(begin (set! ,frame-pointer-register
                          (+ ,frame-pointer-register ,(ash size align-shift)))
-                       (return-point ,label ,tail)
+                       (return-point ,label ,(ash size align-shift) ,live ,tail)
                        (set! ,frame-pointer-register
                          (- ,frame-pointer-register ,(ash size align-shift)))))]
           [(if ,[(Pred size) -> cond] ,[(Effect size) -> conseq] ,[(Effect size) -> alter])
@@ -2097,8 +2119,8 @@
       (lambda (e)
         (match e
           [(nop) (list 'nop)]
-          [(return-point ,label ,[(Tail map) -> tail])
-           `(return-point ,label ,tail)]
+          [(return-point ,label ,size (,[(Var map) -> live*] ...) ,[(Tail map) -> tail])
+           `(return-point ,label ,size ,live* ,tail)]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset]
              (,op ,[(Triv map) -> e1] ,[(Triv map) -> e2]))
            `(mset! ,base ,offset (,op ,e1 ,e2))]
@@ -2193,8 +2215,8 @@
   (define Effect
     (lambda (e)
       (match e
-        [(return-point ,label ,[Tail -> tail u])
-         (values `(return-point ,label ,tail) u)]
+        [(return-point ,label ,size ,live ,[Tail -> tail u])
+         (values `(return-point ,label ,size ,live ,tail) u)]
         [(if ,[Pred -> cond u1] ,[Effect -> conseq u2] ,[Effect -> alter u3])
          (values `(if ,cond ,conseq ,alter)
            (append u1 u2 u3))]
@@ -2393,8 +2415,8 @@
         (lambda (e)
           (match e
             [(nop) post]
-            [(return-point ,label ,[Tail -> live])
-             (union live post)]
+            [(return-point ,label ,size ,live ,[Tail -> t-l])
+             (union t-l post)]
             [(if ,cond ,[(Effect post) -> c-l] ,[(Effect post) -> a-l])
              ((Pred c-l a-l) cond)]
             [(begin ,effect* ... ,[(Effect post) -> live])
@@ -2742,7 +2764,7 @@
   (define Effect
     (lambda (e)
       (match e
-        [(return-point ,label ,[Tail -> tail]) `(return-point ,label ,tail)]
+        [(return-point ,label ,size ,live ,[Tail -> tail]) `(return-point ,label ,size ,live ,tail)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) `(begin ,effect* ... ,effect)]
         [,x x])))
@@ -2784,8 +2806,8 @@
       (lambda (e)
         (match e
           [(nop) (list 'nop)]
-          [(return-point ,label ,[(Tail map) -> tail])
-           `(return-point ,label ,tail)]
+          [(return-point ,label ,size ,live ,[(Tail map) -> tail])
+           `(return-point ,label ,size ,live ,tail)]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
           [(set! ,[(Var map) -> v1] (,op ,[(Triv map) -> v2] ,[(Triv map) -> x]))
@@ -2849,8 +2871,8 @@
       (lambda (e)
         (match e
           [(nop) (values (list 'nop) offset)]
-          [(return-point ,label ,[(Tail offset) -> tail])
-           (values `(return-point ,label ,tail) offset)]
+          [(return-point ,label ,size ,live ,[(Tail offset) -> tail])
+           (values `(return-point ,label ,size ,live ,tail) offset)]
           [(mset! ,[(Triv offset) -> base] ,[(Triv offset) -> off] ,[(Triv offset) -> expr])
            (values `(mset! ,base ,off ,expr) offset)]
           [(set! ,[(Var offset) -> v1] (,op ,[(Triv offset)  -> v2] ,[(Triv offset) -> x]))
@@ -2926,10 +2948,12 @@
        `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
 
 (define-who expose-basic-blocks
+  (define frame-information)
   (define Program
     (lambda (p)
+      (set! frame-information '())
       (match p
-        [(let ,data*
+        [(let (,data* ...)
            (letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block]))
          (letrec ([pair (lambda (headers others)
                           (if (null? headers) '()
@@ -2937,7 +2961,10 @@
                                 (cons (car headers) (car others))
                                 (pair (cdr headers) (cdr others)))))])
            (let ([blocks (pair `([,label* (lambda () ,body*)] ...) block*)])
-             `(let ,data* (letrec ,(append block blocks) ,body))))])))
+             `(let ([frame-information ,frame-information]
+                    ,data* ...)
+                (letrec ,(append block blocks)
+                  ,body))))])))
   (define Tail
     (lambda (t)
       (match t
@@ -2979,7 +3006,8 @@
       (lambda (e)
         (match e
           [(nop) (values k '())]
-          [(return-point ,label ,[Tail -> tail block])
+          [(return-point ,label ,size ,live ,[Tail -> tail block])
+           (set! frame-information (cons (list label size live) frame-information))
            (values tail (append block (list `[,label (lambda () ,k)])))]
           [(if ,cond ,conseq ,alter)
            (let ([c (unique-label 'c)]
@@ -3189,6 +3217,7 @@
 
 (define label-alias)
 (define closure-length)
+(define frame-information)
 
 (define label->x86-64-label
   (lambda (lab)
@@ -3233,6 +3262,51 @@
        (emit 'popq 'rbx)
        (emit 'ret))]))
 
+(define reverse-buffer)
+(define reverse-size)
+(define reverse-max)
+(define reverse-first?)
+(define reverse-padding)
+(define reverse-delim)
+(define reverse-out)
+(define reverse-init
+  (lambda ()
+    (set! reverse-buffer '())
+    (set! reverse-size 0)
+    (set! reverse-first? #t)))
+(define reverse-clear
+  (lambda ()
+    (if reverse-first?
+        (set! reverse-first? #f)
+        (printf "~a" reverse-delim))
+    (for-each reverse-out reverse-buffer)
+    (set! reverse-buffer '())
+    (set! reverse-size 0)))
+(define reverse-sweep
+  (lambda ()
+    (when reverse-padding
+      (unless (= 0 reverse-size)
+        (let loop ([i (- reverse-max reverse-size)])
+          (unless (= i 0)
+            (begin (reverse-put reverse-padding)
+                   (loop (sub1 i)))))))))
+(define reverse-put
+  (lambda (byte)
+    (set! reverse-buffer (cons byte reverse-buffer))
+    (set! reverse-size (add1 reverse-size))
+    (when (= reverse-size reverse-max) (reverse-clear))))
+(define-syntax with-reverse-buffer
+  (syntax-rules ()
+    [(_ g f p d expr* ...)
+     (begin
+       (set! reverse-max g)
+       (set! reverse-out f)
+       (set! reverse-padding p)
+       (set! reverse-delim d)
+       (reverse-init)
+       expr* ...
+       (reverse-sweep))]))
+
 (define-who generate-x86-64
   (define Program
     (lambda (p)
@@ -3252,8 +3326,25 @@
           (cond [(assq label closure-length) =>
                  (lambda (n)
                    (emit '.data)
-                   (printf "    .quad  ~a\n" (cadr n))
-                   (emit '.text))])
+                   (printf "    .quad ~a\n" (cadr n))
+                   (emit '.text))]
+                [(assq label frame-information) =>
+                 (lambda (info)
+                   (let ([size (cadr info)]
+                         [live (caddr info)])
+                     (emit '.data)
+                     (printf "    .byte 0b")
+                     (with-reverse-buffer 8 display 0 ", 0b"
+                       (let loop ([i 0])
+                         (unless (= (ash i align-shift) size)
+                           (let ([fv (index->frame-var i)])
+                             (if (and (not (eq? fv return-address-location)) (memq fv live))
+                                 (reverse-put 1)
+                                 (reverse-put 0)))
+                           (loop (+ i 1)))))
+                     (printf "\n")
+                     (printf "    .quad ~a\n" size)
+                     (emit '.text)))])
           (emit-label label)]
         [(jump ,dst) (emit-jump 'jmp dst)]
         [(if (,rel ,x ,y) (jump ,dst))
@@ -3270,100 +3361,71 @@
   Program)
 
 ;; needs documentation
-(define emit-static-data
-  (let ([buffer #f]
-        [size #f]
-        [first? #t]
-        [has-symbol? #f]
-        [has-complex? #f])
-    (define init
-      (lambda ()
-        (set! buffer '())
-        (set! size 0)
-        (set! first? #t)))
-    (define clear
-      (lambda ()
-        (if first?
-            (set! first? #f)
-            (printf ","))
-        (printf "0x")
-        (for-each (lambda (byte) (printf "~2,'0,,:X" byte)) buffer)
-        (set! buffer '())
-        (set! size 0)))
-    (define sweep
-      (lambda ()
-        (unless (= 0 size)
-          (let loop ([i (- 8 size)])
-            (unless (= i 0)
-              (begin (Byte 0)
-                     (loop (sub1 i))))))))
-    (define Byte
-      (lambda (byte)
-        (set! buffer (cons byte buffer))
-        (set! size (add1 size))
-        (when (= size 8) (clear))))
-    (define Ptr
-      (lambda (ptr)
-        (let loop ([c 8] [x ptr])
-          (unless (zero? c)
-            (Byte (mod x 256))
-            (loop (- c 1) (div x 256))))))
-    (define Char
-      (lambda (ch) (Byte (char->integer ch))))
-    (define Datum
-      (lambda (lit)
-        (cond [(pair? lit)
-               (Byte flag-pair)
-               (Datum (car lit))
-               (Datum (cdr lit))]
-              [(and (vector? lit) (zero? (vector-length lit)))
-               (Byte flag-empty-vector)]
-              [(vector? lit)
-               (Byte flag-vector)
-               (Ptr (ash (vector-length lit) shift-fixnum))
-               (vector-for-each Datum lit)
-               (Byte flag-vector-end)]
-              [(eq? lit $true) (Byte flag-true)]
-              [(eq? lit $false) (Byte flag-false)]
-              [(eq? lit $nil)  (Byte flag-nil)]
-              [else
-                (Byte flag-trivial)
-                (Ptr lit)])))
-    (define Data
-      (lambda (data)
-        (match data
-          [(label-alias ,alias) (set! label-alias alias)]
-          [(closure-length ,nfv) (set! closure-length nfv)]
-          [(symbol-dump ((quote ,sym*) ...))
-           (emit '.global "_scheme_symbol_dump")
-           (emit-label "_scheme_symbol_dump")
-           (if (null? sym*)
-               (emit '.ascii "\"\"")
-               (begin
-                 (printf "    .quad ")
-                 (init)
+(define-who emit-static-data
+  (define output-byte
+    (lambda (b) (printf "~2,'0,,:X" b)))
+  (define Byte reverse-put)
+  (define Ptr
+    (lambda (ptr)
+      (let loop ([c 8] [x ptr])
+        (unless (zero? c)
+          (Byte (mod x 256))
+          (loop (- c 1) (div x 256))))))
+  (define Char
+    (lambda (ch) (Byte (char->integer ch))))
+  (define Datum
+    (lambda (lit)
+      (cond [(pair? lit)
+             (Byte flag-pair)
+             (Datum (car lit))
+             (Datum (cdr lit))]
+            [(and (vector? lit) (zero? (vector-length lit)))
+             (Byte flag-empty-vector)]
+            [(vector? lit)
+             (Byte flag-vector)
+             (Ptr (ash (vector-length lit) shift-fixnum))
+             (vector-for-each Datum lit)
+             (Byte flag-vector-end)]
+            [(= lit $true) (Byte flag-true)]
+            [(= lit $false) (Byte flag-false)]
+            [(= lit $nil) (Byte flag-nil)]
+            [else
+              (Byte flag-trivial)
+              (Ptr lit)])))
+  (define Data
+    (lambda (data)
+      (match data
+        [(label-alias ,alias) (set! label-alias alias)]
+        [(closure-length ,nfv) (set! closure-length nfv)]
+        [(frame-information ,fi) (set! frame-information fi)]
+        [(symbol-dump ((quote ,sym*) ...))
+         (emit '.global "_scheme_symbol_dump")
+         (emit-label "_scheme_symbol_dump")
+         (if (null? sym*)
+             (emit '.ascii "\"\"")
+             (begin
+               (printf "    .quad 0x")
+               (with-reverse-buffer 8 output-byte 0 ", 0x"
                  (for-each
                    (lambda (sym)
                      (string-for-each Char (symbol->string sym))
                      (Char #\x00))
-                   sym*)
-                 (sweep)
-                 (printf "\n")))]
-          [(roots-length ,n)
-           (emit '.global "_scheme_roots")
-           (emit-label "_scheme_roots")
-           (printf "    .quad ~a\n" n)
-           (printf "    .zero ~a\n" n)]
-          [(,lab (encode-literal (quote ,complex)))
-           (emit-label lab)
-           (printf "    .quad ")
-           (init)
-           (Datum complex)
-           (sweep)
-           (printf "\n")])))
-    (lambda (data*)
-      (emit '.data)
-      (for-each Data data*))))
+                   sym*))
+               (printf "\n")))]
+        [(roots-length ,n)
+         (emit '.global "_scheme_roots")
+         (emit-label "_scheme_roots")
+         (printf "    .quad ~a\n" n)
+         (printf "    .zero ~a\n" n)]
+        [(,lab (encode-literal (quote ,complex)))
+         (emit-label lab)
+         (printf "    .quad 0x")
+         (with-reverse-buffer 8 output-byte 0 ", 0x"
+           (Datum complex))
+         (printf "\n")])))
+  (lambda (data*)
+    (emit '.data)
+    (for-each Data data*)))
 
 (compiler-passes '(
   parse-scheme
@@ -3480,7 +3542,10 @@
                        `(lambda (,v) ,(read-back (e ne)))))]
                   [else `',e]))]
         [normalize (lambda (e) (read-back (val e)))])
-     (normalize '(lambda (x) (lambda (y) (x y))))))
+     (normalize '(((lambda (x) (lambda (y) (x y)))
+                   (lambda (x) (x x)))
+                  (lambda (x)
+                    (lambda (y) x))))))
 
 (define yin-yang
   '(let ([count 50]
