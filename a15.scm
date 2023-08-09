@@ -1093,8 +1093,8 @@
           [(letrec ([,lab* ,[Lambda -> lambda*]] ...)
              (closures (,[(Closure cp fvs) -> bind* fill*] ...) ,[(Expr cp fvs) -> body]))
            `(letrec ([,lab* ,lambda*] ...)
-              (let (,bind* ...)
-                ,(make-begin `(,fill* ... ,body))))]
+              ,(make-let bind*
+                 (make-begin `(,fill* ... ,body))))]
           [(,prim ,[(Expr cp fvs) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
           [(call/cc ,[(Expr cp fvs) -> expr]) `(call/cc ,expr)]
@@ -1111,8 +1111,7 @@
   (lambda (x)
     (set! closure-length '())
     (let ([x^ ((Expr #f '()) x)])
-      `(let ([closure-length ,closure-length])
-         ,x^))))
+      `(with-closure-length ,closure-length ,x^))))
 
 (define-who lift-letrec
   (define Expr
@@ -1135,9 +1134,9 @@
         [,x (values x '())])))
   (lambda (p)
     (match p
-      [(let ,data ,body)
+      [(with-closure-length ,closure-length ,body)
        (let-values ([(body^ binds) (Expr body)])
-         `(let ,data
+         `(with-closure-length ,closure-length
             (letrec ,binds ,body^)))])))
 
 (define-who normalize-context
@@ -1211,8 +1210,12 @@
         [,x (format-error who "invalid expression ~s in effect context" x)])))
   (lambda (p)
     (match p
-      [(let ,data (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...) ,[Value -> body]))
-       `(let ,data (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-closure-length ,closure-length
+         (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...)
+           ,[Value -> body]))
+       `(with-closure-length ,closure-length
+          (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...)
+            ,body))])))
 
 (define-who specify-representation
   (define specify-complex
@@ -1376,25 +1379,24 @@
     (set! root-label (unique-label 'root))
     (set! n-complex 0)
     (match p
-      [(let (,data* ...)
+      [(with-closure-length ,closure-length
          (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
            ,[Value -> body]))
        (match label-complex-disp*
          [([,lab* ,complex* ,disp*] ...)
           (let* ([decode-literal-label (unique-label 'decode-literal)]
                  [l* (map (lambda (v) decode-literal-label) lab*)])
-            `(let ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
-                                   (reverse symbol->index))]
-                   [label-alias ((,decode-literal-label "_scheme_decode_literal")
-                                 (,call/cc-label "_scheme_call_with_current_continuation")
-                                 (,root-label "_scheme_roots"))]
-                   [,lab* (encode-literal (quote ,complex*))] ...
-                   [roots-length ,(+ disp-root-globals (ash n-complex align-shift))]
-                   ;; prepared for registers (all registers are saved on collection as root)
-                   ,data* ...)
-               (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
-                 (begin (,l* ,lab* ,disp*) ...
-                        ,body))))])])))
+            `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
+                                [,call/cc-label "_scheme_call_with_current_continuation"]
+                                [,root-label "_scheme_roots"])
+               (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
+                                                  (reverse symbol->index))]
+                                  [,lab* (encode-literal (quote ,complex*))] ...
+                                  [roots-length ,(+ disp-root-globals (ash n-complex align-shift))])
+                 (with-closure-length ,closure-length
+                   (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
+                     (begin (,l* ,lab* ,disp*) ...
+                            ,body))))))])])))
 
 (define-who uncover-locals
   (define locals)
@@ -1452,8 +1454,14 @@
         [,x (values)])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
 (define-who remove-let
   (define reorder-assign
@@ -1549,8 +1557,14 @@
         [,x (values x (if (uvar? x) (list x) '()) #f)])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
 (define verify-uil (lambda (x) x))
 
@@ -1633,8 +1647,14 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
 (define-who flatten-set!
   (define do-flatten-set!
@@ -1693,8 +1713,14 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
 (define-who impose-calling-conventions
   (define new-frames)
@@ -1812,9 +1838,15 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body]))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body]))))
        (let ([body*^ (map (lambda (p b) ((Body p) b)) uvar* body*)])
-         `(let ,data* (letrec ([,label* (lambda () ,body*^)] ...) ,body)))])))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*^)] ...) ,body)))))])))
 
 (define-who expose-allocation-pointer
   (define Body
@@ -1855,8 +1887,14 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
 (define uncover-frame-conflict
   (letrec ([graph #f]
@@ -1877,8 +1915,14 @@
     (define Program
       (lambda (p)
         (match p
-          [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+          [(with-label-alias ,label-alias
+             (with-global-data ,data
+               (with-closure-length ,closure-length
+                 (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+           `(with-label-alias ,label-alias
+              (with-global-data ,data
+                (with-closure-length ,closure-length
+                  (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
     (define Body
       (lambda (b)
         (set! call-live '())
@@ -1970,8 +2014,14 @@
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (lambda (b)
       (match b
@@ -2072,15 +2122,27 @@
           [,x x]))))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
 
 (define-who finalize-frame-locations
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (lambda (b)
       (match b
@@ -2327,8 +2389,14 @@
                             [else (values e '())])])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
 
 (define uncover-register-conflict
   (letrec ([graph #f]
@@ -2357,8 +2425,14 @@
     (define Program
       (lambda (p)
         (match p
-          [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+          [(with-label-alias ,label-alias
+             (with-global-data ,data
+               (with-closure-length ,closure-length
+                 (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+           `(with-label-alias ,label-alias
+              (with-global-data ,data
+                (with-closure-length ,closure-length
+                  (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
     (define Body
       (lambda (b)
         (match b
@@ -2608,15 +2682,27 @@
                           (frame-conflict ,frame-conflict ,tail)))))))]))))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
 
 (define-who assign-registers-vanilla
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (letrec ([low-degree? (lambda (e) (< (length (cdr e)) (length registers)))]
              [select (lambda (conflict ok?)
@@ -2693,7 +2779,10 @@
         [,x (error who "invalid Body ~s" x)])))
   (lambda (x)
     (match x
-      [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda () ,body*)] ...) ,body))))
        (andmap all-home? `(,body ,body* ...))]
       [,x (error who "invalid Program ~s" x)])))
 
@@ -2701,8 +2790,14 @@
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (lambda (b)
       (match b
@@ -2739,8 +2834,14 @@
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (lambda (b)
       (match b
@@ -2774,8 +2875,14 @@
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Body -> body*])] ...) ,[Body -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Body
     (lambda (b)
       (match b
@@ -2830,8 +2937,14 @@
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,[(Tail 0) -> body*])] ...) ,[(Tail 0) -> body]))
-         `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[(Tail 0) -> body*])] ...) ,[(Tail 0) -> body]))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,data
+              (with-closure-length ,closure-length
+                (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
   (define Tail
     (lambda (offset)
       (lambda (t)
@@ -2944,8 +3057,14 @@
         [,x x])))
   (lambda (p)
     (match p
-      [(let ,data* (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))
-       `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])))
+      [(with-label-alias ,label-alias
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))))
+       `(with-label-alias ,label-alias
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
 
 (define-who expose-basic-blocks
   (define frame-information)
@@ -2953,18 +3072,22 @@
     (lambda (p)
       (set! frame-information '())
       (match p
-        [(let (,data* ...)
-           (letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block]))
+        [(with-label-alias ,label-alias
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block]))))
          (letrec ([pair (lambda (headers others)
                           (if (null? headers) '()
                               (append
                                 (cons (car headers) (car others))
                                 (pair (cdr headers) (cdr others)))))])
            (let ([blocks (pair `([,label* (lambda () ,body*)] ...) block*)])
-             `(let ([frame-information ,frame-information]
-                    ,data* ...)
-                (letrec ,(append block blocks)
-                  ,body))))])))
+             `(with-label-alias ,label-alias
+                (with-global-data ,data
+                  (with-closure-length ,closure-length
+                    (with-frame-information ,frame-information
+                      (letrec ,(append block blocks)
+                        ,body)))))))])))
   (define Tail
     (lambda (t)
       (match t
@@ -3074,45 +3197,94 @@
     (lambda (p)
       (set! graph '())
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
-         `(let ,data* (letrec ,(apply append (map build-tail label* body*)) ,body))])))
+        [(with-label-alias ,label-alias
+             (with-global-data ,global-data
+               (with-closure-length ,closure-length
+                 (with-frame-information ,frame-information
+                   (letrec ([,label* (lambda () ,body*)] ...) ,body)))))
+         `(with-label-alias ,label-alias
+            (with-global-data ,global-data
+              (with-closure-length ,closure-length
+                (with-frame-information ,frame-information
+                  (letrec ,(apply append (map build-tail label* body*)) ,body)))))])))
   (lambda (p)
     (if *optimize-jumps-enabled*
         (match (build p)
-          [(let ,data* (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))
-           `(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))])
+          [(with-label-alias ,label-alias
+             (with-global-data ,global-data
+               (with-closure-length ,closure-length
+                 (with-frame-information ,frame-information
+                   (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body])))))
+           `(with-label-alias ,label-alias
+              (with-global-data ,global-data
+                (with-closure-length ,closure-length
+                  (with-frame-information ,frame-information
+                    (letrec ([,label* (lambda () ,body*)] ...) ,body)))))])
         p)))
 
 (define-who flatten-program
+  (define label-alias)
   (define Program
     (lambda (p)
       (match p
-        [(let ,data* (letrec ([,label* (lambda () ,body*)] ...) ,body))
-         (letrec ([cat (lambda (label body)
-                         (cond [(null? label) '()]
+        [(with-label-alias ,la
+           (with-global-data ,data
+             (with-closure-length ,closure-length
+               (with-frame-information ,frame-information
+                 (letrec ([,label* (lambda () ,body*)] ...) ,body)))))
+         (set! label-alias la)
+         (letrec ([next-label (lambda (label*)
+                                (if (null? (cdr label*))
+                                    #f
+                                    (let ([next (cadr label*)])
+                                      (cond [(assq next closure-length) #f]
+                                            [(assq next frame-information) #f]
+                                            [else next]))))]
+                  [cat (lambda (label* body*)
+                         (cond [(null? label*) '()]
                                [else
-                                 (let ([next (if (null? (cdr label)) #f (cadr label))])
-                                   (cons (car label)
-                                     (append ((Tail next) (car body))
-                                       (cat (cdr label) (cdr body)))))]))])
-           (let ([next (if (null? label*) #f (car label*))])
+                                 (let* ([lab (car label*)]
+                                        [info
+                                          (cond [(assq lab closure-length) =>
+                                                 (lambda (l) (list `(quad ,(cadr l))))]
+                                                [(assq lab frame-information) =>
+                                                 (lambda (i) `((live-mask ,@(cdr i))
+                                                               (quad ,(cadr i))))]
+                                                ['()])]
+                                        [next (next-label label*)])
+                                   (append info
+                                     (cons lab
+                                       (append ((Tail next) (car body*))
+                                         (cat (cdr label*) (cdr body*))))))]))])
+           (let ([next (next-label (cons 'dummy label*))])
              (list
-               (cons 'data data*)
+               (cons 'data data)
                (cons 'code (append ((Tail next) body) (cat label* body*))))))])))
   (define Tail
     (lambda (next)
       (lambda (t)
         (match t
-          [(begin ,eff* ... ,[(Tail next) -> tail])
+          [(begin ,[Effect -> eff*] ... ,[(Tail next) -> tail])
            (append eff* tail)]
-          [(if (,rel ,x ,y) (,c) (,a))
+          [(if (,rel ,x ,y) (,[Triv -> c]) (,[Triv -> a]))
            (cond [(eq? c next) `((if (not (,rel ,x ,y)) (jump ,a)))]
                  [(eq? a next) `((if (,rel ,x ,y) (jump ,c)))]
                  [else `((if (,rel ,x ,y) (jump ,c))
                          (jump ,a))])]
-          [(,triv)
-           (if (eq? triv next) '()
-               (list (list 'jump triv)))]))))
+          [(,[Triv -> triv])
+           (cond [(eq? triv next) '()]
+                 [else (list `(jump ,triv))])]))))
+  (define Effect
+    (lambda (e)
+      (match e
+        [(set! ,v1 (,rator ,[Triv -> v1] ,[Triv -> v2]))
+         `(set! ,v1 (,rator ,v1 ,v2))]
+        [(set! ,v1 ,[Triv -> v2])
+         `(set! ,v1 ,v2)])))
+  (define Triv
+    (lambda (triv)
+      (cond [(assq triv label-alias) => cadr]
+            [else triv])))
   Program)
 
 ;; taken from yinwang
@@ -3215,15 +3387,6 @@
               (exact->inexact (/ (apply + *all-code-size*)
                                  (length *all-code-size*)))))))
 
-(define label-alias)
-(define closure-length)
-(define frame-information)
-
-(define label->x86-64-label
-  (lambda (lab)
-    (cond [(assq lab label-alias) => cadr]
-          [else (format "L~a" (extract-suffix lab))])))
-
 (define-syntax emit-jump
   (syntax-rules ()
     [(_ opcode ?target)
@@ -3236,7 +3399,6 @@
   (syntax-rules ()
     [(_ code code* ...)
      (begin
-       (emit '.text)
        (emit '.globl "_scheme_entry")
        (emit-label "_scheme_entry")
        (emit 'pushq 'rbx)
@@ -3317,34 +3479,25 @@
                            (unless (null? s)
                              (Statement (car s))
                              (emit* (cdr s))))])
+           (printf "    .section _scheme, \"awx\"\n")
            (emit-static-data data*)
            (emit-program (emit* stmt*)))])))
   (define Statement
     (lambda (s)
       (match s
-        [,label (guard (label? label))
-          (cond [(assq label closure-length) =>
-                 (lambda (n)
-                   (emit '.data)
-                   (printf "    .quad ~a\n" (cadr n))
-                   (emit '.text))]
-                [(assq label frame-information) =>
-                 (lambda (info)
-                   (let ([size (cadr info)]
-                         [live (caddr info)])
-                     (emit '.data)
-                     (printf "    .byte 0b")
-                     (with-reverse-buffer 8 display 0 ", 0b"
-                       (let loop ([i 0])
-                         (unless (= (ash i align-shift) size)
-                           (let ([fv (index->frame-var i)])
-                             (if (and (not (eq? fv return-address-location)) (memq fv live))
-                                 (reverse-put 1)
-                                 (reverse-put 0)))
-                           (loop (+ i 1)))))
-                     (printf "\n")
-                     (printf "    .quad ~a\n" size)
-                     (emit '.text)))])
+        [(quad ,dw) (printf "    .quad ~a\n" dw)]
+        [(live-mask ,size ,live)
+         (printf "    .byte 0b")
+         (with-reverse-buffer 8 display 0 ", 0b"
+           (let loop ([i 0])
+             (unless (= (ash i align-shift) size)
+               (let ([fv (index->frame-var i)])
+                 (if (and (not (eq? fv return-address-location)) (memq fv live))
+                     (reverse-put 1)
+                     (reverse-put 0)))
+               (loop (+ i 1)))))
+         (printf "\n")]
+        [,label (guard (or (label? label) (string? label)))
           (emit-label label)]
         [(jump ,dst) (emit-jump 'jmp dst)]
         [(if (,rel ,x ,y) (jump ,dst))
@@ -3355,9 +3508,10 @@
          (emit-jump (not-rel->assembly rel) dst)]
         [(set! ,v1 (,rator ,v1 ,v2))
          (emit (binop->assembly rator) v2 v1)]
-        [(set! ,v1 ,v2) (if (label? v2)
-                            (emit 'leaq v2 v1)
-                            (emit 'movq v2 v1))])))
+        [(set! ,v1 ,v2)
+         (cond [(label? v2) (emit 'leaq v2 v1)]
+               [(string? v2) (emit 'leaq (format "~a(%rip)" v2) v1)]
+               [else (emit 'movq v2 v1)])])))
   Program)
 
 ;; needs documentation
@@ -3395,9 +3549,6 @@
   (define Data
     (lambda (data)
       (match data
-        [(label-alias ,alias) (set! label-alias alias)]
-        [(closure-length ,nfv) (set! closure-length nfv)]
-        [(frame-information ,fi) (set! frame-information fi)]
         [(symbol-dump ((quote ,sym*) ...))
          (emit '.global "_scheme_symbol_dump")
          (emit-label "_scheme_symbol_dump")
@@ -3424,7 +3575,6 @@
            (Datum complex))
          (printf "\n")])))
   (lambda (data*)
-    (emit '.data)
     (for-each Data data*)))
 
 (compiler-passes '(
