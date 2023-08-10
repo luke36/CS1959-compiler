@@ -1,4 +1,4 @@
-;; todo: add trap-return-point; gc itself
+;; todo: add trap-return-point (not now)
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -24,7 +24,7 @@
 (define *max-inline-literal-size* 0)
 (define *collection-enabled* #t)
 
-(define disp-root-globals (ash (length registers) align-shift))
+(define disp-root-globals 0)
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
 (define return-address-location 'fv0)
@@ -134,11 +134,11 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  `(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
+  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
 (define predicate-primitives
- `(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
+  '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
 (define effect-primitives
-  `(set-car! set-cdr! vector-set! procedure-set!))
+  '(set-car! set-cdr! vector-set! procedure-set!))
 (define value-primitive?
   (lambda (x) (memq x value-primitives)))
 (define predicate-primitive?
@@ -149,7 +149,7 @@
   (lambda (x) (or (value-primitive? x) (predicate-primitive? x) (effect-primitive? x))))
 
 (define user-primitive
-  `([+             . 2]
+  '([+             . 2]
     [-             . 2]
     [*             . 2]
     [car           . 1]
@@ -1722,8 +1722,9 @@
             (with-closure-length ,closure-length
               (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
-(define-who insert-overflow-check ; incorrect; procedure call
+(define-who insert-overflow-check
   (define new-local*)
+  (define collect-label)
   (define wrap-with
     (lambda (expr x)
       (let ([tmp (unique-name 't)])
@@ -1735,11 +1736,11 @@
                       [(,[e*] ...) (apply append e*)]
                       [0 '()]
                       [,x `((set! ,tmp (+ ,tmp ,x)))])])
-              (make-begin
+              (make-nopless-begin
                 `((set! ,tmp ,allocation-pointer-register)
                   ,@inc
                   (if (> ,tmp ,end-of-allocation-register)
-                      (collect)
+                      (,collect-label)
                       (nop))
                   ,expr)))))))
   (define Body
@@ -1762,6 +1763,10 @@
         [(begin ,eff* ... ,[Tail -> tail n])
          (let-values ([(eff*^ n^) ((Effect* n) eff*)])
            (values (make-begin `(,eff*^ ... ,tail)) n^))]
+        [(alloc ,expr)
+         (if (number? expr)
+             (values e expr)
+             (values (wrap-with e expr) 0))]
         [,x (values x 0)])))
   (define Pred
     (lambda (post)
@@ -1819,15 +1824,18 @@
               (values (cons a d) n^))))))
   (lambda (p)
     (if *collection-enabled*
-        (match p
-          [(with-label-alias ,label-alias
-             (with-global-data ,data
-               (with-closure-length ,closure-length
-                 (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
-           `(with-label-alias ,label-alias
-              (with-global-data ,data
-                (with-closure-length ,closure-length
-                  (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])
+        (begin
+          (set! collect-label (unique-label 'collect))
+          (match p
+            [(with-label-alias (,label-alias* ...)
+               (with-global-data ,data
+                 (with-closure-length ,closure-length
+                   (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+             `(with-label-alias ([,collect-label "_scheme_collect"]
+                                 ,label-alias* ...)
+                (with-global-data ,data
+                  (with-closure-length ,closure-length
+                    (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))]))
         p)))
 
 (define-who impose-calling-conventions
@@ -1848,9 +1856,7 @@
              (let ([nfv (unique-name 'nfv)])
                (let ([result (cons `(set! ,nfv ,(car args))
                                (fill-arguments (cdr args) #f))])
-                 (set! new-frames (cons
-                                    (cons (caar new-frames) (cons nfv (cdar new-frames)))
-                                    (cdr new-frames)))
+                 (set! new-frames (cons (cons nfv (car new-frames)) (cdr new-frames)))
                  result))]
             [(integer? which)
              (cons `(set! ,(index->frame-var which) ,(car args))
@@ -1866,7 +1872,7 @@
             [(locals (,uvar* ...) ,[(Tail rp) -> tail])
              (let ([prologue (cons `(set! ,rp ,return-address-register)
                                (fetch-arguments parameter parameter-registers))])
-               `(locals (,uvar* ... ,rp ,parameter ... ,@(apply append (map cdr new-frames)))
+               `(locals (,uvar* ... ,rp ,parameter ... ,new-frames ... ...)
                   (with-return-point ,rp
                     (new-frames ,new-frames
                       (begin ,@prologue ,tail)))))])))))
@@ -1910,29 +1916,28 @@
   (define Effect
     (lambda (e)
       (match e
-        [(collect) '(nop)] ; todo
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
         [(,proc ,args* ...) (guard (and (not (eq? proc 'set!))
                                         (not (eq? proc 'nop))
                                         (not (eq? proc 'mset!))))
-         (let ([rp-label (unique-label 'rp)])
-           (set! new-frames (cons `(,rp-label) new-frames))
-           (let* ([in-register (take (length parameter-registers) args*)]
-                  [in-new-frame (drop (length parameter-registers) args*)]
-                  [fill-register (fill-arguments in-register parameter-registers)]
-                  [fill-new-frame (fill-arguments in-new-frame #f)])
-             `(return-point ,rp-label
-                (begin ,@fill-new-frame
-                       ,@fill-register
-                       (set! ,return-address-register ,rp-label)
-                       (,proc
-                         ,frame-pointer-register
-                         ,return-address-register
-                         ,allocation-pointer-register
-                         ,stack-base-register
-                         ,@(if *collection-enabled* (list end-of-allocation-register) '())
-                         ,@(map cadr fill-register) ,@(map cadr fill-new-frame))))))]
+         (set! new-frames (cons `() new-frames))
+         (let* ([in-register (take (length parameter-registers) args*)]
+                [in-new-frame (drop (length parameter-registers) args*)]
+                [fill-register (fill-arguments in-register parameter-registers)]
+                [fill-new-frame (fill-arguments in-new-frame #f)]
+                [rp-label (unique-label 'rp)])
+           `(return-point ,rp-label
+              (begin ,@fill-new-frame
+                     ,@fill-register
+                     (set! ,return-address-register ,rp-label)
+                     (,proc
+                       ,frame-pointer-register
+                       ,return-address-register
+                       ,allocation-pointer-register
+                       ,stack-base-register
+                       ,@(if *collection-enabled* (list end-of-allocation-register) '())
+                       ,@(map cadr fill-register) ,@(map cadr fill-new-frame)))))]
         [(set! ,uvar (,proc ,args* ...)) (guard
                                              (not (binop? proc))
                                            (not (eq? proc 'mref))
@@ -1989,6 +1994,9 @@
       (match e
         [(set! ,uvar (alloc ,expr))
          `(begin (set! ,uvar ,allocation-pointer-register)
+                 (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
+        [(mset! ,base ,offset (alloc ,expr))
+         `(begin (mset! ,base ,offset ,allocation-pointer-register)
                  (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
          `(if ,cond ,conseq ,alter)]
@@ -2087,7 +2095,7 @@
             [(return-point ,label ,[Tail -> tail live])
              (set! call-live (union post call-live))
              (values `(return-point ,label ,post ,tail)
-               (union live post))] ; todo
+               (union live post))] ; todo(?)
             [(if ,cond ,[(Effect post) -> conseq c-l] ,[(Effect post) -> alter a-l])
              (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
                (values `(if ,cond^ ,conseq ,alter) live))]
@@ -2174,13 +2182,13 @@
   Program)
 
 (define-who assign-new-frame
-  (define nfv**) ; side effects again...
-  (define nfv-home**)
   (define assign-new-frames
-    (lambda (nfv* size)
-      (if (null? nfv*) '()
-          (cons `(,(car nfv*) ,(index->frame-var (add1 size)))
-            (assign-new-frames (cdr nfv*) (add1 size))))))
+    (lambda (new-frames frame-size)
+      (letrec ([assign-one (lambda (x i)
+                             (if (null? x) '()
+                                 (cons `(,(car x) ,(index->frame-var (+ frame-size i)))
+                                   (assign-one (cdr x) (+ i 1)))))])
+        (apply append (map (lambda (x) (assign-one x 1)) new-frames)))))
   (define Body
     (lambda (b)
       (match b
@@ -2189,52 +2197,45 @@
              (locate ,home*
                (frame-conflict ,frame-conflict
                  (call-live ,call-lives ,tail)))))
-         (set! nfv** nfv*)
-         (set! nfv-home** '())
-         (let ([tail^ ((Tail home*) tail)])
-           `(locals ,(difference uvar* (apply append (map cdr nfv*)))
+         (let* ([fv* (map frame-var->index
+                       (append (map cadr home*) (filter frame-var? call-lives)))]
+                [frame-size (if (null? fv*) 0 (+ 1 (apply max fv*)))])
+           `(locals ,(difference uvar* (apply append nfv*))
               (ulocals ()
-                (locate ,(append home* (apply append nfv-home**))
-                  (frame-conflict ,frame-conflict ,tail^)))))])))
+                (locate ,(append home* (assign-new-frames nfv* frame-size))
+                  (frame-conflict ,frame-conflict ,[(Tail frame-size) tail])))))])))
   (define Tail
-    (lambda (assign)
+    (lambda (size)
       (lambda (t)
         (match t
-          [(if ,[(Pred assign) -> cond] ,[(Tail assign) -> conseq] ,[(Tail assign) -> alter])
+          [(if ,[(Pred size) -> cond] ,[(Tail size) -> conseq] ,[(Tail size) -> alter])
            `(if ,cond ,conseq ,alter)]
-          [(begin ,[(Effect assign) -> effect*] ... ,[(Tail assign) -> tail])
+          [(begin ,[(Effect size) -> effect*] ... ,[(Tail size) -> tail])
            (make-begin `(,effect* ... ,tail))]
           [,x x]))))
   (define Pred
-    (lambda (assign)
+    (lambda (size)
       (lambda (p)
         (match p
-          [(if ,[(Pred assign) -> cond] ,[(Pred assign) -> conseq] ,[(Pred assign) -> alter])
+          [(if ,[(Pred size) -> cond] ,[(Pred size) -> conseq] ,[(Pred size) -> alter])
            `(if ,cond ,conseq ,alter)]
-          [(begin ,[(Effect assign) -> effect*] ... ,[(Pred assign) -> pred])
+          [(begin ,[(Effect size) -> effect*] ... ,[(Pred size) -> pred])
            (make-begin `(,effect* ... ,pred))]
           [,x x]))))
   (define Effect
-    (lambda (assign)
+    (lambda (size)
       (lambda (e)
         (match e
           [(return-point ,label ,live ,tail)
-           (let* ([fv* (union (filter frame-var? live)
-                              (map (lambda (uv) (cadr (assq uv assign)))
-                                (intersection (map car assign) live)))]
-                  [size (if (null? fv*) 0 (+ 1 (apply max (map frame-var->index fv*))))]
-                  [nfv* (cdr (assq label nfv**))]
-                  [nfv-home* (assign-new-frames nfv* size)])
-             (set! nfv-home** (cons nfv-home* nfv-home**))
-             (if (zero? size) e         ; impossible though
-                 `(begin (set! ,frame-pointer-register
-                           (+ ,frame-pointer-register ,(ash size align-shift)))
-                         (return-point ,label ,(ash size align-shift) ,fv* ,tail)
-                         (set! ,frame-pointer-register
-                           (- ,frame-pointer-register ,(ash size align-shift))))))]
-          [(if ,[(Pred assign) -> cond] ,[(Effect assign) -> conseq] ,[(Effect assign) -> alter])
+           (if (zero? size) e ; impossible though
+               `(begin (set! ,frame-pointer-register
+                         (+ ,frame-pointer-register ,(ash size align-shift)))
+                       (return-point ,label ,(ash size align-shift) ,live ,tail)
+                       (set! ,frame-pointer-register
+                         (- ,frame-pointer-register ,(ash size align-shift)))))]
+          [(if ,[(Pred size) -> cond] ,[(Effect size) -> conseq] ,[(Effect size) -> alter])
            `(if ,cond ,conseq ,alter)]
-          [(begin ,[(Effect assign) -> effect*] ... ,[(Effect assign) -> effect])
+          [(begin ,[(Effect size) -> effect*] ... ,[(Effect size) -> effect])
            (make-begin `(,effect* ... ,effect))]
           [,x x]))))
   (lambda (p)
@@ -3363,9 +3364,13 @@
                                  (let* ([lab (car label*)]
                                         [info
                                           (cond [(assq lab closure-length) =>
-                                                 (lambda (l) (list `(quad ,(cadr l))))]
+                                                 (lambda (l) `((align 8) ; hard coded...
+                                                               (zeros ,tag-procedure) ; `align' code address
+                                                               (quad ,(cadr l))))]
                                                 [(assq lab frame-information) =>
-                                                 (lambda (i) `((live-mask ,@(cdr i))
+                                                 (lambda (i) `((live-mask
+                                                                 ,(sra (cadr i) align-shift)
+                                                                 ,(map frame-var->index (caddr i)))
                                                                (quad ,(cadr i))))]
                                                 ['()])]
                                         [next (next-label label*)])
@@ -3479,11 +3484,13 @@
                 [*all-code-size* '()])
       (test-all #f)
       (printf "\n** Options **
+        garbage collection:            ~a
         encode large literal:          ~a
         iterated register coalescing:  ~a
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
+              (bool->word *collection-enabled*)
               (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
@@ -3526,8 +3533,8 @@
        (emit 'pushq 'r15)
        (emit 'movq 'rdi frame-pointer-register)
        (emit 'movq 'rdi stack-base-register)
-       (emit 'movq 'rsi allocation-pointer-register)
        (emit 'movq 'rdx end-of-allocation-register)
+       (emit 'movq 'rsi allocation-pointer-register)
        (emit 'leaq "_scheme_exit(%rip)" return-address-register)
        code code* ...
        (emit '.globl "_scheme_exit")
@@ -3597,22 +3604,25 @@
                            (unless (null? s)
                              (Statement (car s))
                              (emit* (cdr s))))])
-           (printf "    .section _scheme, \"awx\"\n")
+           (emit '.data)
            (emit-static-data data*)
+           (emit '.text)
            (emit-program (emit* stmt*)))])))
   (define Statement
     (lambda (s)
       (match s
-        [(quad ,dw) (printf "    .quad ~a\n" dw)]
-        [(live-mask ,size ,live)
+        [(align ,align) (emit '.align (number->string align))]
+        [(zeros ,n) (emit '.zero (number->string n))]
+        [(quad ,dw) (emit '.quad (number->string dw))]
+        [(live-mask ,n ,live)
          (printf "    .byte 0b")
          (with-reverse-buffer 8 display 0 ", 0b"
            (let loop ([i 0])
-             (unless (= (ash i align-shift) size)
-               (let ([fv (index->frame-var i)])
-                 (if (and (not (eq? fv return-address-location)) (memq fv live))
-                     (reverse-put 1)
-                     (reverse-put 0)))
+             (unless (= i n)
+               (if (and (not (eq? i (frame-var->index return-address-location)))
+                        (memq i live))
+                   (reverse-put 1)
+                   (reverse-put 0))
                (loop (+ i 1)))))
          (printf "\n")]
         [,label (guard (or (label? label) (string? label)))
@@ -3668,7 +3678,7 @@
     (lambda (data)
       (match data
         [(symbol-dump ((quote ,sym*) ...))
-         (emit '.global "_scheme_symbol_dump")
+         (emit '.globl "_scheme_symbol_dump")
          (emit-label "_scheme_symbol_dump")
          (if (null? sym*)
              (emit '.ascii "\"\"")
@@ -3682,10 +3692,11 @@
                    sym*))
                (printf "\n")))]
         [(roots-length ,n)
-         (emit '.global "_scheme_roots")
+         (emit '.align "8")
+         (emit '.globl "_scheme_roots")
          (emit-label "_scheme_roots")
-         (printf "    .quad ~a\n" n)
-         (printf "    .zero ~a\n" n)]
+         (emit '.quad (number->string n))
+         (emit '.zero (number->string n))]
         [(,lab (encode-literal (quote ,complex)))
          (emit-label lab)
          (printf "    .quad 0x")
@@ -3724,7 +3735,7 @@
   remove-complex-opera*
   flatten-set!
   insert-overflow-check
-  impose-calling-conventions ; only source of dead assignment (in this compiler)
+  impose-calling-conventions
   expose-allocation-pointer
   uncover-frame-conflict
   pre-assign-frame
@@ -3846,3 +3857,14 @@
      (begin
        (fact 10)
        kk)))
+
+(define garbage
+  '(letrec ([malloc
+              (lambda (n)
+                (if (= 0 n)
+                    'success
+                    (let ([trash (make-vector 10000)])
+                      (vector-set! trash 0 trash)
+                      (malloc (- n 1)))))])
+     (malloc 25)))
+

@@ -1,4 +1,4 @@
-    .global _scheme_decode_literal
+    .globl _scheme_decode_literal
 _scheme_decode_literal:
     movq $-2, %rax
 DL_LOOP_ENTRY:
@@ -87,14 +87,14 @@ DL_RETURN:
     movq %rax, 0(%r9, %r10)
     jmp *%r15
 
-    .global _scheme_symbol_to_address
+    .globl _scheme_symbol_to_address
 _scheme_symbol_to_address:
     sarq $3, %rdi
     leaq _scheme_symbol_dump(%rip), %rax
     addq %rdi, %rax
     ret
 
-    .global _scheme_call_with_current_continuation
+    .globl _scheme_call_with_current_continuation
 _scheme_call_with_current_continuation:
 CALLCC_MAKE_CONT:
     movq %rdx, %r9
@@ -135,3 +135,13 @@ IC_DO_COPY:
 IC_RETURN:
     movq %r9, %rax
     jmp *6(%r8)
+
+    .globl _scheme_collect
+_scheme_collect:
+    movq %r15, %rdi
+    movq %rbp, %rsi
+    call collect
+    movq %rax, %rdx
+    leaq new_heap_end(%rip), %r13
+    movq 0(%r13), %r13
+    jmp *%r15

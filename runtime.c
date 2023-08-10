@@ -20,8 +20,10 @@
 #endif
 
 #define SCHEME_EXIT _scheme_exit
+#define SCHEME_ROOTS _scheme_roots
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
+extern long *SCHEME_ROOTS;
 extern long SCHEME_ENTRY(char *, char *, char *);
 extern void SCHEME_EXIT(void);
 extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
@@ -109,7 +111,7 @@ int main(int argc, char *argv[]) {
   }
 
  /* run the Scheme program and print the result */
-  print(SCHEME_ENTRY(stack, heap, heap + heap_size));
+  print(SCHEME_ENTRY(stack, heap, heap + heapsize));
   printf("\n");
 
   return 0;
@@ -234,6 +236,7 @@ typedef long ptr;
 #define VECTORDATA(x) ((ptr *)(UNTAG(x,tag_vector) + disp_vector_data))
 
 #define PROCEDURECODE(x) (*(ptr *)(UNTAG(x,tag_procedure) + disp_procedure_code))
+#define PROCEDUREDATA(x) ((ptr *)(UNTAG(x,tag_procedure) + disp_procedure_data))
 #define CLOSURESIZE(x) (*(long *)((long)PROCEDURECODE(x) + disp_closure_size))
 #define CONTINUATIONRETURNADDRESS(x) \
   (*(void **)(UNTAG(x,tag_procedure) + disp_continuation_return_address))
@@ -245,7 +248,7 @@ typedef long ptr;
 #define MAXDEPTH 100
 #define MAXLENGTH 1000
 
-void walk(void *ra, ptr *top);
+static void walk(void *ra, ptr *top);
 static void print1(ptr x, int d) {
   if (TAG(x, mask_fixnum) == tag_fixnum) {
     printf("%ld", (long)UNFIX(x));
@@ -295,7 +298,11 @@ static void print1(ptr x, int d) {
     if (n > MAXLENGTH) printf(" ..."); 
     printf(")");
   } else if (TAG(x, mask_procedure) == tag_procedure) {
-    printf("#<procedure>");
+    int n = CLOSURESIZE(x);
+    if (n == continuation_special_flag)
+      printf("#<continuation>");
+    else
+      printf("#<procedure>");
   } else if (x == _false) {
     printf("#f");
   } else if (x == _true) {
@@ -337,10 +344,10 @@ static void print(long x) {
 #define LIVE_MASK_END(x) ((char *)((long)x + disp_live_mask_end))
 #define ITH_LIVE(s, i) (*(s + ((i - 1) >> 3)) & (1 << (i & 0b111)))
 
-void walk1(void *ra, ptr *top, int d) {
+static void walk1(void *ra, ptr *top, int d) {
   if (ra == SCHEME_EXIT)
     return;
-  printf("---------------- STACK %d BEGIN ----------------\n", d);
+  printf("; ---------------- STACK %d BEGIN ----------------\n", d);
   long size = FRAME_SIZE(ra);
   long nptr = UNFIX(size);
   long nbyte = ((nptr - 1) >> 3) + 1;
@@ -348,14 +355,141 @@ void walk1(void *ra, ptr *top, int d) {
   ptr *bot = top - nptr;
   for (long i = 1; i < nptr; i++)
     if (ITH_LIVE(mask_start, i)) {
-      printf("var %ld: ", i);
+      printf(";   var %ld: ", i);
       print1(*(bot + i), 0);
       printf("\n");
     }
   walk1((void *)bot[0], bot, d + 1);
 }
 
-void walk(void *ra, ptr *top) {
+static void walk(void *ra, ptr *top) {
   walk1(ra, top, 0);
 }
 
+static ptr *new_heap;
+ptr *new_heap_end;
+static ptr *scan_ptr;
+static ptr *alloc_ptr;
+
+#define DOTAG(x, tag) ((ptr)(x) + (tag))
+#define FORWARDED(x) (new_heap <= (ptr *)(x) && (ptr *)(x) < new_heap_end)
+
+static void collect_stack(void *ra, ptr *top);
+
+static ptr *collect_one(ptr *p) {
+  ptr x = *p;
+  if (TAG(x, mask_fixnum) == tag_fixnum) {
+    return p + 1;
+  } else if (TAG(x, mask_pair) == tag_pair) {
+    ptr car = CAR(x);
+    if (TAG(car, mask_pair) == tag_pair &&
+        FORWARDED(UNTAG(car, tag_pair))) { // forwarded
+      *p = car;
+      return p + 1;
+    } else {
+      *p = CAR(x) = DOTAG(alloc_ptr, tag_pair);
+      *(alloc_ptr++) = car;
+      *(alloc_ptr++) = CDR(x);
+      return p + 1;
+    }
+  } else if (TAG(x, mask_vector) == tag_vector) {
+    long length = VECTORLENGTH(x);
+    if (TAG(length, mask_vector) == tag_vector &&
+        FORWARDED(UNTAG(length, tag_vector))) {
+      *p = length;
+      return p + 1;
+    } else {
+      *p = VECTORLENGTH(x) = DOTAG(alloc_ptr, tag_vector);
+      ptr *data = VECTORDATA(x);
+      *(alloc_ptr++) = length;
+      memcpy(alloc_ptr, data, length);
+      alloc_ptr += UNFIX(length);
+      return p + 1;
+    }
+  } else if (TAG(x, mask_procedure) == tag_procedure) {
+    if (FORWARDED(UNTAG(x, tag_procedure)) ||
+        (heap <= (char *)(UNTAG(x, tag_procedure)) &&
+         (char *)(UNTAG(x, tag_procedure)) < heap + heapsize)) {
+      ptr code = PROCEDURECODE(x);
+      if (FORWARDED(UNTAG(x, tag_procedure))) {
+        *p = code;
+        return p + 1;
+      } else {
+        long size = CLOSURESIZE(x);
+        if (size == continuation_special_flag) {
+          long size = CONTINUATIONSTACKSIZE(x);
+          *p = PROCEDURECODE(x) = DOTAG(alloc_ptr, tag_procedure);
+          *(alloc_ptr++) = code;
+          *(alloc_ptr++) = (ptr)CONTINUATIONRETURNADDRESS(x);
+          memcpy(alloc_ptr, CONTINUATIONSTACK(x), size);
+          alloc_ptr += UNFIX(size);
+          return p + 1;
+        } else {
+          ptr *data = PROCEDUREDATA(x);
+          *p = PROCEDURECODE(x) = DOTAG(alloc_ptr, tag_procedure);
+          *(alloc_ptr++) = code;
+          memcpy(alloc_ptr, data, size);
+          alloc_ptr += UNFIX(size);
+          return p + 1;
+        }
+      }
+    } else {
+      ptr me = DOTAG(p, tag_procedure);
+      long size = CLOSURESIZE(me);
+      if (size == continuation_special_flag) {
+        collect_stack(CONTINUATIONRETURNADDRESS(me), CONTINUATIONSTACK(me));
+        return CONTINUATIONSTACK(me) + UNFIX(CONTINUATIONSTACKSIZE(me));
+      } else
+        return p + 1;
+    }
+  } else if (x == _false) {
+    return p + 1;
+  } else if (x == _true) {
+    return p + 1;
+  } else if (x == _nil) {
+    return p + 1;
+  } else if (x == _void) {
+    return p + 1;
+  } else if (TAG(x, mask_symbol) == tag_symbol) {
+    return p + 1;
+  } else {
+    return p + 1; // impossible
+  }
+}
+
+static void collect_stack(void *ra, ptr *top) {
+  while (ra != SCHEME_EXIT) {
+    long size = FRAME_SIZE(ra);
+    long nptr = UNFIX(size);
+    long nbyte = ((nptr - 1) >> 3) + 1;
+    char *mask_start = LIVE_MASK_END(ra) - nbyte;
+    ptr *bot = top - nptr;
+    for (long i = 1; i < nptr; i++)
+      if (ITH_LIVE(mask_start, i))
+        collect_one(bot + i);
+    ra = (void*)bot[0];
+    top = bot;
+  }
+}
+
+#define ROOTLENGTH(x) (*(long *)((char *)(x) + disp_root_length))
+#define ROOTROOTS(x) ((ptr *)((char *)(x) + disp_root_roots))
+
+ptr *collect(void *ra, ptr *top) {
+  new_heap = (ptr *)guarded_area(heapsize);
+  new_heap_end = (ptr *)((char *)new_heap + heap_size);
+  scan_ptr = new_heap;
+  alloc_ptr = new_heap;
+
+  long length = ROOTLENGTH(SCHEME_ROOTS);
+  ptr *roots = ROOTROOTS(SCHEME_ROOTS);
+  for (int i = 0; i < UNFIX(length); i++)
+    collect_one(roots + i);
+  collect_stack(ra, top);
+  while (scan_ptr < alloc_ptr)
+    scan_ptr = collect_one(scan_ptr);
+
+  free(heap);
+  heap = (char *)new_heap;
+  return alloc_ptr;
+}
