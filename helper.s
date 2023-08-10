@@ -140,8 +140,8 @@ IC_RETURN:
 _scheme_collect:
     movq %r15, %rdi
     movq %rbp, %rsi
+    leaq 0(%rbp), %rdx
     call collect
     movq %rax, %rdx
-    leaq new_heap_end(%rip), %r13
-    movq 0(%r13), %r13
+    movq 0(%rbp), %r13
     jmp *%r15

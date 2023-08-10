@@ -367,7 +367,7 @@ static void walk(void *ra, ptr *top) {
 }
 
 static ptr *new_heap;
-ptr *new_heap_end;
+static ptr *new_heap_end;
 static ptr *scan_ptr;
 static ptr *alloc_ptr;
 
@@ -475,7 +475,7 @@ static void collect_stack(void *ra, ptr *top) {
 #define ROOTLENGTH(x) (*(long *)((char *)(x) + disp_root_length))
 #define ROOTROOTS(x) ((ptr *)((char *)(x) + disp_root_roots))
 
-ptr *collect(void *ra, ptr *top) {
+ptr *collect(void *ra, ptr *top, ptr **end_of_allocation) {
   new_heap = (ptr *)guarded_area(heapsize);
   new_heap_end = (ptr *)((char *)new_heap + heap_size);
   scan_ptr = new_heap;
@@ -491,5 +491,6 @@ ptr *collect(void *ra, ptr *top) {
 
   free(heap);
   heap = (char *)new_heap;
+  *end_of_allocation = new_heap_end;
   return alloc_ptr;
 }
