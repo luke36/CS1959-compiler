@@ -335,7 +335,7 @@ static void print(long x) {
 
 #define FRAME_SIZE(x) (*(long *)((long)x + disp_frame_size))
 #define LIVE_MASK_END(x) ((char *)((long)x + disp_live_mask_end))
-#define ITH_LIVE(s, i) (*(s + (i - 1) / 8) & (1 << (i % 8)))
+#define ITH_LIVE(s, i) (*(s + ((i - 1) >> 3)) & (1 << (i & 0b111)))
 
 void walk1(void *ra, ptr *top, int d) {
   if (ra == SCHEME_EXIT)
@@ -343,7 +343,7 @@ void walk1(void *ra, ptr *top, int d) {
   printf("---------------- STACK %d BEGIN ----------------\n", d);
   long size = FRAME_SIZE(ra);
   long nptr = UNFIX(size);
-  long nbyte = (nptr - 1) / 8 + 1;
+  long nbyte = ((nptr - 1) >> 3) + 1;
   char *mask_start = LIVE_MASK_END(ra) - nbyte;
   ptr *bot = top - nptr;
   for (long i = 1; i < nptr; i++)

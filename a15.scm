@@ -1,4 +1,4 @@
-;; todo: insert overflow checking; add trap-return-point; gc itself
+;; todo: add trap-return-point; gc itself
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -22,7 +22,7 @@
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
 (define *max-inline-literal-size* 0)
-(define *collection-enabled* #f)
+(define *collection-enabled* #t)
 
 (define disp-root-globals (ash (length registers) align-shift))
 (define stack-base-register 'r14)
@@ -1722,6 +1722,114 @@
             (with-closure-length ,closure-length
               (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])))
 
+(define-who insert-overflow-check ; incorrect; procedure call
+  (define new-local*)
+  (define wrap-with
+    (lambda (expr x)
+      (let ([tmp (unique-name 't)])
+        (set! new-local* (cons tmp new-local*))
+        (if (and (number? x) (= x 0))
+            expr
+            (let ([inc
+                    (match x
+                      [(,[e*] ...) (apply append e*)]
+                      [0 '()]
+                      [,x `((set! ,tmp (+ ,tmp ,x)))])])
+              (make-begin
+                `((set! ,tmp ,allocation-pointer-register)
+                  ,@inc
+                  (if (> ,tmp ,end-of-allocation-register)
+                      (collect)
+                      (nop))
+                  ,expr)))))))
+  (define Body
+    (lambda (b)
+      (match b
+        [(locals (,uvar* ...) ,tail)
+         (set! new-local* '())
+         (let-values ([(tail^ n) (Tail tail)])
+           `(locals (,uvar* ... ,new-local* ...)
+              ,(wrap-with tail^ n)))])))
+  (define Tail
+    (lambda (t)
+      (match t
+        [(if ,cond ,[Tail -> conseq n1] ,[Tail -> alter n2])
+         (if (= n1 n2)
+             (let-values ([(cond^ n) ((Pred n1) cond)])
+               (values `(if ,cond^ ,conseq ,alter) n))
+             (let-values ([(cond^ n3) ((Pred 0) cond)])
+               (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
+        [(begin ,eff* ... ,[Tail -> tail n])
+         (let-values ([(eff*^ n^) ((Effect* n) eff*)])
+           (values (make-begin `(,eff*^ ... ,tail)) n^))]
+        [,x (values x 0)])))
+  (define Pred
+    (lambda (post)
+      (lambda (p)
+        (match p
+          [(if ,cond ,[(Pred post) -> conseq n1] ,[(Pred post) -> alter n2])
+           (if (= n1 n2)
+               (let-values ([(cond^ n) ((Pred n1) cond)])
+                 (values `(if ,cond^ ,conseq ,alter) n))
+               (let-values ([(cond^ n3) ((Pred 0) cond)])
+                 (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
+          [(begin ,eff* ... ,[(Pred post) -> pred n])
+           (let-values ([(eff*^ n^) ((Effect* n) eff*)])
+             (values (make-begin `(,eff*^ ... ,pred)) n^))]
+          [,x (values x post)]))))
+  (define Effect
+    (lambda (post)
+      (lambda (e)
+        (match e
+          [(set! ,uvar (alloc ,expr))
+           (if (number? expr)
+               (values e (+ post expr))
+               (values (wrap-with e (list expr post)) 0))]
+          [(mset! ,base ,offset (alloc ,expr))
+           (if (number? expr)
+               (values e (+ post expr))
+               (values (wrap-with e (list expr post)) 0))]
+          [(set! ,uvar (,proc ,args* ...)) (guard (and (not (binop? proc))
+                                                       (not (eq? proc 'mref))))
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
+          [(mset! ,base ,offset (,proc ,args* ...)) (guard (and (not (binop? proc))
+                                                                (not (eq? proc 'mref))))
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
+          [(,proc ,arg* ...) (guard (and (not (eq? proc 'set!))
+                                         (not (eq? proc 'mset!))
+                                         (not (eq? proc 'nop))))
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
+          [(if ,cond ,[(Effect post) -> conseq n1] ,[(Effect post) -> alter n2])
+           (if (= n1 n2)
+               (let-values ([(cond^ n) ((Pred n1) cond)])
+                 (values `(if ,cond^ ,conseq ,alter) n))
+               (let-values ([(cond^ n3) ((Pred 0) cond)])
+                 (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
+          [(begin ,eff* ... ,[(Effect post) -> eff n])
+           (let-values ([(eff*^ n^) ((Effect* n) eff*)])
+             (values (make-begin `(,eff*^ ... ,eff)) n^))]
+          [,x (values x post)]))))
+  (define Effect*
+    (lambda (post)
+      (lambda (e*)
+        (if (null? e*)
+            (values '() post)
+            (let*-values ([(d n) ((Effect* post) (cdr e*))]
+                          [(a n^) ((Effect n) (car e*))])
+              (values (cons a d) n^))))))
+  (lambda (p)
+    (if *collection-enabled*
+        (match p
+          [(with-label-alias ,label-alias
+             (with-global-data ,data
+               (with-closure-length ,closure-length
+                 (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+           `(with-label-alias ,label-alias
+              (with-global-data ,data
+                (with-closure-length ,closure-length
+                  (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))])
+        p)))
+
 (define-who impose-calling-conventions
   (define new-frames)
   (define fetch-arguments
@@ -1770,8 +1878,8 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[Effect -> effect*] ... ,[(Tail rp) -> tail]) (make-begin `(,effect* ... ,tail))]
           [(,proc ,rand* ...) (guard (not (binop? proc))
-                                     (not (eq? proc 'mref))
-                                     (not (eq? proc 'alloc)))
+                                (not (eq? proc 'mref))
+                                (not (eq? proc 'alloc)))
            (let* ([in-register (take (length parameter-registers) rand*)]
                   [in-frame (drop (length parameter-registers) rand*)]
                   [fill-register (fill-arguments in-register parameter-registers)]
@@ -1802,12 +1910,12 @@
   (define Effect
     (lambda (e)
       (match e
+        [(collect) '(nop)] ; todo
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
         [(,proc ,args* ...) (guard (and (not (eq? proc 'set!))
                                         (not (eq? proc 'nop))
-                                        (not (eq? proc 'mset!))
-                                        (not (binop? proc))))
+                                        (not (eq? proc 'mset!))))
          (let ([rp-label (unique-label 'rp)])
            (set! new-frames (cons `(,rp-label) new-frames))
            (let* ([in-register (take (length parameter-registers) args*)]
@@ -1826,13 +1934,13 @@
                          ,@(if *collection-enabled* (list end-of-allocation-register) '())
                          ,@(map cadr fill-register) ,@(map cadr fill-new-frame))))))]
         [(set! ,uvar (,proc ,args* ...)) (guard
-                                           (not (binop? proc))
+                                             (not (binop? proc))
                                            (not (eq? proc 'mref))
                                            (not (eq? proc 'alloc)))
          `(begin ,(Effect `(,proc ,args* ...))
                  (set! ,uvar ,return-value-register))]
         [(mset! ,base ,offset (,proc ,args* ...)) (guard
-                                                    (not (binop? proc))
+                                                      (not (binop? proc))
                                                     (not (eq? proc 'mref))
                                                     (not (eq? proc 'alloc)))
          `(begin ,(Effect `(,proc ,args* ...))
@@ -3615,6 +3723,7 @@
   verify-uil
   remove-complex-opera*
   flatten-set!
+  insert-overflow-check
   impose-calling-conventions ; only source of dead assignment (in this compiler)
   expose-allocation-pointer
   uncover-frame-conflict
