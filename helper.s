@@ -145,3 +145,19 @@ _scheme_collect:
     movq %rax, %rdx
     movq 0(%rbp), %r13
     jmp *%r15
+
+    .globl _scheme_inspect
+_scheme_inspect:
+    movq %r8, %rdi
+    movq %rdx, %r12
+    call inspect
+    movq %r12, %rdx
+    jmp *%r15
+
+    .globl _scheme_write
+_scheme_write:
+    movq %r8, %rdi
+    movq %rdx, %r12
+    call scheme_write
+    movq %r12, %rdx
+    jmp *%r15

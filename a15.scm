@@ -138,7 +138,7 @@
 (define predicate-primitives
   '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
 (define effect-primitives
-  '(set-car! set-cdr! vector-set! procedure-set!))
+  '(set-car! set-cdr! vector-set! procedure-set! inspect write))
 (define value-primitive?
   (lambda (x) (memq x value-primitives)))
 (define predicate-primitive?
@@ -174,7 +174,9 @@
     [symbol?       . 1]
     [set-car!      . 2]
     [set-cdr!      . 2]
-    [vector-set!   . 3]))
+    [vector-set!   . 3]
+    [inspect       . 1]
+    [write         . 1]))
 (define user-primitive?
   (lambda (x) (assq x user-primitive)))
 (define user-primitive->arity
@@ -1230,6 +1232,8 @@
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
   (define call/cc-label)
+  (define write-label)
+  (define inspect-label)
   (define current-dump-length)
   (define symbol->index)
   (define label-complex-disp*)
@@ -1337,6 +1341,8 @@
          `(begin ,effect* ... ,effect)]
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Effect -> effect])
          `(let ([,uvar* ,value*] ...) ,effect)]
+        [(write ,[Value -> expr]) `(,write-label ,expr)]
+        [(inspect ,[Value -> expr]) `(,inspect-label ,expr)]
         [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(set-car! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-car ,e)]
         [(set-cdr! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-cdr ,e)]
@@ -1379,6 +1385,8 @@
     (set! symbol->index '())
     (set! label-complex-disp* '())
     (set! call/cc-label (unique-label 'call/cc))
+    (set! write-label (unique-label 'write))
+    (set! inspect-label (unique-label 'inspect))
     (set! root-label (unique-label 'root))
     (set! n-complex 0)
     (match p
@@ -1391,6 +1399,8 @@
                  [l* (map (lambda (v) decode-literal-label) lab*)])
             `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
                                 [,call/cc-label "_scheme_call_with_current_continuation"]
+                                [,write-label "_scheme_write"]
+                                [,inspect-label "_scheme_inspect"]
                                 [,root-label "_scheme_roots"])
                (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                                   (reverse symbol->index))]
@@ -3874,7 +3884,7 @@
                       [else (* n (fact (- n 1)))]))])
      (begin
        (fact 10)
-       kk)))
+       (inspect kk))))
 
 (define garbage
   '(letrec ([malloc

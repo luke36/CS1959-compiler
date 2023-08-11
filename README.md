@@ -51,8 +51,11 @@ Comparison:
 ```
 
 ### additional features:
+- simple IO
+- several syntactic extensions
 - basic symbol manipulation
 - option to encode large literals
-- several syntactic extensions
-- naieve call/cc
-- garbage collection
+- naieve `call/cc`
+- (hopefully correct) garbage collection
+
+I tried to supplement (some) missing ducuments FYI, and would like to add more.

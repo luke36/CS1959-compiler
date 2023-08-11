@@ -251,7 +251,6 @@ typedef long ptr;
 #define MAXDEPTH 100
 #define MAXLENGTH 1000
 
-static void walk(void *ra, ptr *top);
 static void print1(ptr x, int d) {
   if (TAG(x, mask_fixnum) == tag_fixnum) {
     printf("%ld", (long)UNFIX(x));
@@ -320,12 +319,6 @@ static void print1(ptr x, int d) {
 }
 
 static void print(ptr x) {
-  if (TAG(x, mask_procedure) == tag_procedure) {
-    int n = CLOSURESIZE(x);
-    if (n == continuation_special_flag)
-      walk(CONTINUATIONRETURNADDRESS(x),
-           CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
-  } else
     print1(x, 0);
 }
 
@@ -337,10 +330,8 @@ static void print(long x) {
 
 #endif /* SCHEME_PRINTER */
 
-/* GC */
-#define SCHEME_ROOTS _scheme_roots
-#define disp_root_length (0)
-#define disp_root_roots (8)
+/* pre-defined procedure */
+
 #define disp_frame_size (-8)
 #define disp_live_mask_end (-8)
 
@@ -349,27 +340,57 @@ static void print(long x) {
 #define ITH_LIVE(s, i) (*(s + ((i - 1) >> 3)) & (1 << (i & 0b111)))
 #define MAXFRAME 100
 
-static void walk1(void *ra, ptr *top, int d) {
-  if (ra == SCHEME_EXIT || d > MAXFRAME)
-    return;
-  printf("; ---------------- STACK %d BEGIN ----------------\n", d);
-  long size = FRAME_SIZE(ra);
-  long nptr = UNFIX(size);
-  long nbyte = ((nptr - 1) >> 3) + 1;
-  char *mask_start = LIVE_MASK_END(ra) - nbyte;
-  ptr *bot = top - nptr;
-  for (long i = 1; i < nptr; i++)
-    if (ITH_LIVE(mask_start, i)) {
-      printf(";   var %ld: ", i);
-      print1(*(bot + i), 0);
-      printf("\n");
+static ptr walk(void *ra, ptr *top) {
+  int d = 0;
+  while (d < MAXFRAME) {
+    if (ra == SCHEME_EXIT || d > MAXFRAME) {
+      printf("#<system continuation>\n");
+      return _void;
+    } else {
+      printf("#<continuation>\n");
+      printf("  frame variables:\n");
     }
-  walk1((void *)bot[0], bot, d + 1);
+    long size = FRAME_SIZE(ra);
+    long nptr = UNFIX(size);
+    long nbyte = ((nptr - 1) >> 3) + 1;
+    char *mask_start = LIVE_MASK_END(ra) - nbyte;
+    ptr *bot = top - nptr;
+    for (long i = 1; i < nptr; i++)
+      if (ITH_LIVE(mask_start, i)) {
+        printf("  %ld.\t ", i);
+        print(*(bot + i));
+        printf("\n");
+      }
+    ra = (void *)bot[0];
+    top = bot;
+    d++;
+  }
+  printf("...\n");
+  return _void;
 }
 
-static void walk(void *ra, ptr *top) {
-  walk1(ra, top, 0);
+ptr inspect(ptr x) {
+  if (TAG(x, mask_procedure) == tag_procedure) {
+    int n = CLOSURESIZE(x);
+    if (n == continuation_special_flag)
+      return walk(CONTINUATIONRETURNADDRESS(x),
+                  CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
+  }
+  print(x);
+  printf("\n");
+  return _void;
 }
+
+ptr scheme_write(ptr x) {
+  print(x);
+  printf("\n");
+  return _void;
+}
+
+/* GC */
+#define SCHEME_ROOTS _scheme_roots
+#define disp_root_length (0)
+#define disp_root_roots (8)
 
 static ptr *new_heap;
 static ptr *new_heap_end;
