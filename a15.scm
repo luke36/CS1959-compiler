@@ -1111,7 +1111,10 @@
   (lambda (x)
     (set! closure-length '())
     (let ([x^ ((Expr #f '()) x)])
-      `(with-closure-length ,closure-length ,x^))))
+      `(with-closure-length ,(if *collection-enabled*
+                                 closure-length
+                                 '())
+         ,x^))))
 
 (define-who lift-letrec
   (define Expr
@@ -3212,7 +3215,9 @@
              `(with-label-alias ,label-alias
                 (with-global-data ,data
                   (with-closure-length ,closure-length
-                    (with-frame-information ,frame-information
+                    (with-frame-information ,(if *collection-enabled*
+                                                frame-information
+                                                '())
                       (letrec ,(append block blocks)
                         ,body)))))))])))
   (define Tail
@@ -3381,7 +3386,7 @@
                                                                  ,(sra (cadr i) align-shift)
                                                                  ,(map frame-var->index (caddr i)))
                                                                (quad ,(cadr i))))]
-                                                ['()])]
+                                                [else '()])]
                                         [next (next-label label*)])
                                    (append info
                                      (cons lab
@@ -3478,7 +3483,11 @@
            (printf "code size: ~a\n" (apply + ins*))
            (set! *all-code-size* (cons (apply + ins*) *all-code-size*))
            x]
-          [,x (if (label? x) 0 1)])))
+          [,x (if (or (label? x)
+                      (eq? (car x) 'quad)
+                      (eq? (car x) 'live-mask)
+                      (eq? (car x) 'align)
+                      (eq? (car x) 'zeros)) 0 1)])))
     (if *enable-analyze*
         (analyze x)
         x)))

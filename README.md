@@ -22,12 +22,13 @@ Comparison:
        average code length:  37.51829268292683
 (time (test-all-analyze))
     134 collections
-    0.246573714s elapsed cpu time, including 0.009755400s collecting
-    0.253762244s elapsed real time, including 0.010013157s collecting
-    1126273056 bytes allocated, including 1128266720 bytes reclaimed
+    0.349357648s elapsed cpu time, including 0.014140636s collecting
+    0.349224759s elapsed real time, including 0.014428504s collecting
+    1126257888 bytes allocated, including 1128416816 bytes reclaimed
 
 ;; mine
 ** Options **
+        garbage collection:            No
         encode large literal:          No
         iterated register coalescing:  Yes
         closure optimization:          Yes
@@ -40,11 +41,18 @@ Comparison:
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5774
-       average code length:  35.207317073170735
+       total code length:    5780
+       average code length:  35.24390243902439
 (time (test-all-analyze))
-    59 collections
-    0.169994175s elapsed cpu time, including 0.006086615s collecting
-    0.237339270s elapsed real time, including 0.006214169s collecting
-    493674240 bytes allocated, including 495636848 bytes reclaimed
+    62 collections
+    0.258806927s elapsed cpu time, including 0.009962852s collecting
+    0.279805691s elapsed real time, including 0.010122055s collecting
+    516086624 bytes allocated, including 521651584 bytes reclaimed
 ```
+
+### additional features:
+- basic symbol manipulation
+- option to encode large literals
+- several syntactic extensions
+- naieve call/cc
+- garbage collection
