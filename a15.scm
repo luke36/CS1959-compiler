@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now)
+;; todo: add trap-return-point (not now); interaction between call/cc and gc
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -3771,7 +3771,7 @@
 
 (trusted-passes #t)
 
-;; special non-trivial tests
+;; special tests
 
 (define long `,(list 'quote tests))
 

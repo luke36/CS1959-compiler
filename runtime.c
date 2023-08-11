@@ -10,6 +10,7 @@
 #include <fcntl.h>
 
 #define stack_size 100000
+/* set this to 1 to stress the GC */
 #define heap_size 100000
 
 #ifdef __APPLE__
@@ -23,7 +24,7 @@
 #define SCHEME_ROOTS _scheme_roots
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
-extern long *SCHEME_ROOTS;
+extern long SCHEME_ROOTS;
 extern long SCHEME_ENTRY(char *, char *, char *);
 extern void SCHEME_EXIT(void);
 extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
@@ -43,6 +44,7 @@ static void print(long x);
 /* local stack/heap management variables */
 static long pagesize;
 static char *heap;
+static char *heap_end;
 static char *stack;
 static long heapsize;
 static long stacksize;
@@ -84,6 +86,7 @@ int main(int argc, char *argv[]) {
 
   stack = guarded_area(stacksize);
   heap = guarded_area(heapsize);
+  heap_end = heap + heapsize;
 
  /* Set up segmentation fault signal handler to catch stack and heap
   * overflow and some memory faults */
@@ -320,7 +323,8 @@ static void print(ptr x) {
   if (TAG(x, mask_procedure) == tag_procedure) {
     int n = CLOSURESIZE(x);
     if (n == continuation_special_flag)
-      walk(CONTINUATIONRETURNADDRESS(x), CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
+      walk(CONTINUATIONRETURNADDRESS(x),
+           CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
   } else
     print1(x, 0);
 }
@@ -343,9 +347,10 @@ static void print(long x) {
 #define FRAME_SIZE(x) (*(long *)((long)x + disp_frame_size))
 #define LIVE_MASK_END(x) ((char *)((long)x + disp_live_mask_end))
 #define ITH_LIVE(s, i) (*(s + ((i - 1) >> 3)) & (1 << (i & 0b111)))
+#define MAXFRAME 100
 
 static void walk1(void *ra, ptr *top, int d) {
-  if (ra == SCHEME_EXIT)
+  if (ra == SCHEME_EXIT || d > MAXFRAME)
     return;
   printf("; ---------------- STACK %d BEGIN ----------------\n", d);
   long size = FRAME_SIZE(ra);
@@ -368,7 +373,6 @@ static void walk(void *ra, ptr *top) {
 
 static ptr *new_heap;
 static ptr *new_heap_end;
-static ptr *scan_ptr;
 static ptr *alloc_ptr;
 
 #define DOTAG(x, tag) ((ptr)(x) + (tag))
@@ -383,7 +387,7 @@ static ptr *collect_one(ptr *p) {
   } else if (TAG(x, mask_pair) == tag_pair) {
     ptr car = CAR(x);
     if (TAG(car, mask_pair) == tag_pair &&
-        FORWARDED(UNTAG(car, tag_pair))) { // forwarded
+        FORWARDED(UNTAG(car, tag_pair))) {
       *p = car;
       return p + 1;
     } else {
@@ -394,8 +398,7 @@ static ptr *collect_one(ptr *p) {
     }
   } else if (TAG(x, mask_vector) == tag_vector) {
     long length = VECTORLENGTH(x);
-    if (TAG(length, mask_vector) == tag_vector &&
-        FORWARDED(UNTAG(length, tag_vector))) {
+    if (TAG(length, mask_vector) == tag_vector) { // forwarded
       *p = length;
       return p + 1;
     } else {
@@ -411,7 +414,7 @@ static ptr *collect_one(ptr *p) {
         (heap <= (char *)(UNTAG(x, tag_procedure)) &&
          (char *)(UNTAG(x, tag_procedure)) < heap + heapsize)) {
       ptr code = PROCEDURECODE(x);
-      if (FORWARDED(UNTAG(x, tag_procedure))) {
+      if (FORWARDED(UNTAG(code, tag_procedure))) {
         *p = code;
         return p + 1;
       } else {
@@ -436,9 +439,10 @@ static ptr *collect_one(ptr *p) {
     } else {
       ptr me = DOTAG(p, tag_procedure);
       long size = CLOSURESIZE(me);
+      ptr *end = CONTINUATIONSTACK(me) + UNFIX(CONTINUATIONSTACKSIZE(me));
       if (size == continuation_special_flag) {
-        collect_stack(CONTINUATIONRETURNADDRESS(me), CONTINUATIONSTACK(me));
-        return CONTINUATIONSTACK(me) + UNFIX(CONTINUATIONSTACKSIZE(me));
+        collect_stack(CONTINUATIONRETURNADDRESS(me), end);
+        return end;
       } else
         return p + 1;
     }
@@ -453,7 +457,8 @@ static ptr *collect_one(ptr *p) {
   } else if (TAG(x, mask_symbol) == tag_symbol) {
     return p + 1;
   } else {
-    return p + 1; // impossible
+    fprintf(stderr, "unrecognized object %ld during collection\n", x);
+    exit(4);
   }
 }
 
@@ -472,14 +477,14 @@ static void collect_stack(void *ra, ptr *top) {
   }
 }
 
-#define ROOTLENGTH(x) (*(long *)((char *)(x) + disp_root_length))
-#define ROOTROOTS(x) ((ptr *)((char *)(x) + disp_root_roots))
+#define ROOTLENGTH(x) (*(long *)((long)(&(x)) + disp_root_length))
+#define ROOTROOTS(x) ((ptr *)((long)(&(x)) + disp_root_roots))
 
 ptr *collect(void *ra, ptr *top, ptr **end_of_allocation) {
   new_heap = (ptr *)guarded_area(heapsize);
-  new_heap_end = (ptr *)((char *)new_heap + heap_size);
-  scan_ptr = new_heap;
+  new_heap_end = (ptr *)((char *)new_heap + heapsize);
   alloc_ptr = new_heap;
+  ptr *scan_ptr = new_heap;
 
   long length = ROOTLENGTH(SCHEME_ROOTS);
   ptr *roots = ROOTROOTS(SCHEME_ROOTS);
@@ -489,8 +494,9 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation) {
   while (scan_ptr < alloc_ptr)
     scan_ptr = collect_one(scan_ptr);
 
-  free(heap);
+  munmap(heap - pagesize, heap_end - heap + 2 * pagesize);
   heap = (char *)new_heap;
+  heap_end = (char *)new_heap_end;
   *end_of_allocation = new_heap_end;
   return alloc_ptr;
 }
