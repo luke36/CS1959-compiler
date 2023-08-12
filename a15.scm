@@ -21,6 +21,7 @@
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
+(define *optimize-global-enabled* #t)
 (define *max-inline-literal-size* 0)
 (define *collection-enabled* #t)
 
@@ -134,11 +135,11 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code))
+  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref))
 (define predicate-primitives
   '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
 (define effect-primitives
-  '(set-car! set-cdr! vector-set! procedure-set! inspect write))
+  '(set-car! set-cdr! vector-set! procedure-set! inspect write global-set!))
 (define value-primitive?
   (lambda (x) (memq x value-primitives)))
 (define predicate-primitive?
@@ -435,13 +436,63 @@
                       (caaadr imm^)]))
              `(quote ,imm))]
         [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
-        [,x (guard (uvar? x)) x])))
+        [,x (guard (uvar? x)) x]
+        [,lab (guard (label? lab)) lab])))
   (lambda (p)
     (set! bindings '())
     (set! fillings '())
-    (let ([p^ (Expr p)])
-      (make-let bindings
-        (make-begin `(,@fillings ,p^))))))
+    (match p
+      [(with-global-data ,data
+         (outmost ,out ,[Expr -> e]))
+       `(with-global-data ,data
+          (outmost ,out
+            ,(make-let bindings
+               (make-begin `(,fillings ... ,e)))))])))
+
+(define-who uncover-outmost
+  (define non-capture?
+    (lambda (e)
+      (match e
+        [(if ,cond ,conseq ,alter)
+         (and (non-capture? cond)
+              (non-capture? conseq)
+              (non-capture? alter))]
+        [(begin ,expr* ... ,expr)
+         (andmap non-capture? (cons expr expr*))]
+        [(let ([,uvar* ,expr*] ...) ,expr)
+         (andmap non-capture? (cons expr expr*))]
+        [(letrec ([,uvar* ,expr*] ...) ,expr)
+         (andmap non-capture? (cons expr expr*))]
+        [(set! ,uvar ,expr) (non-capture? expr)]
+        [(lambda (,uvar* ...) ,expr) #t]
+        [(,prim ,rand* ...) (guard (primitive? prim))
+         (for-all non-capture? rand*)]
+        [(call/cc ,expr) #f]
+        [(quote ,imm) #t]
+        [(,proc ,arg* ...) #f]
+        [,x (guard (uvar? x)) #t])))
+  (define Expr
+    (lambda (e)
+      (match e
+        [(if ,[o1] ,o2 ,o3) o1]
+        [(begin ,[o] ,o*) o]
+        [(let ([,uvar* ,e*] ...) ,e)
+         (if (for-all non-capture? e*)
+             (apply append (Expr e)
+               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*)) ; just a temporary solution
+             '())]
+        [(letrec ([,uvar* ,e*] ...) ,[o])
+         (apply append o
+           (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*))]
+        [(set! ,uvar ,[o]) o]
+        [(lambda (,uvar* ...) ,body) '()]
+        [(,prim ,o* ...) (guard (primitive? prim)) '()]
+        [(call/cc ,[o]) o]
+        [(quote ,imm) '()]
+        [(,o ,o* ...) '()]
+        [,x (guard (uvar? x)) '()])))
+  (lambda (p)
+    `(outmost ,(if *optimize-global-enabled* (Expr p) '()) ,p)))
 
 (define-who uncover-assigned
   (define Expr
@@ -478,8 +529,9 @@
          (values `(,proc ,arg* ...) (apply union a a*))]
         [,x (guard (uvar? x)) (values x '())])))
   (lambda (p)
-    (let-values ([(p^ a) (Expr p)])
-      p^)))
+    (match p
+      [(outmost ,out ,[Expr -> e a])
+       `(outmost ,out ,e)])))
 
 (define-who purify-letrec
   (define simple?
@@ -502,7 +554,8 @@
           [(call/cc ,expr) #f]
           [(quote ,imm) #t]
           [(,proc ,arg* ...)
-           (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*)))]
+           ;; (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*)))
+           (andmap (simple? x* reduc-now?) (cons proc arg*))] ; r6rs
           [,x (guard (uvar? x)) (not (memq x x*))]))))
   (define partition
     (lambda (x* b* as*)
@@ -545,6 +598,7 @@
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
       [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
+      [(outmost ,out ,[e]) `(outmost ,out ,e)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x (guard (uvar? x)) x])))
 
@@ -636,8 +690,9 @@
                   [else (values x '())])]))))
   (lambda (p)
     (if *cp-1-enabled*
-        (let-values ([(p^ v) ((Expr '()) p)])
-          p^)
+        (match p
+          [(outmost ,out ,[(Expr '()) -> e v])
+           `(outmost ,out ,e)])
         p)))
 
 (define-who optimize-useless
@@ -716,29 +771,39 @@
                 (values '(void) '()))]))))
   (lambda (prog)
     (if *cp-1-enabled*
-        (let-values ([(prog^ u) ((Expr 'value) prog)])
-          prog^)
+        (match prog
+          [(outmost ,out ,[(Expr 'value) -> e u])
+           `(outmost ,out ,e)])
         prog)))
 
 (define-who convert-assignments
+  (define global-label)
   (define Expr
-    (lambda (assigned)
+    (lambda (assigned outmost)
       (lambda (e)
         (match e
           [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
           [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
           [(let ([,uvar* ,[expr*]] ...) (assigned (,as* ...) ,expr))
-           (let* ([new-t* (map unique-name as*)]
-                  [correspond (map cons as* new-t*)]
+           (let* ([global* (intersection as* outmost)]
+                  [lab* (map (lambda (uv) (unique-label (string->symbol (extract-root uv)))) global*)]
+                  [box* (difference as* outmost)]
+                  [new-t* (map unique-name box*)]
+                  [correspond (map cons box* new-t*)]
                   [subst (lambda (x) (cond [(assq x correspond) => cdr]
                                            [else x]))]
                   [new-bind* (map subst uvar*)])
+             (set! global-label (append `([,global* . ,lab*] ...) global-label))
              (make-let `([,new-bind* ,expr*] ...)
-               (make-let `([,as* (cons ,new-t* (void))] ...)
-                 ((Expr (append as* assigned)) expr))))]
+               (make-let `([,box* (cons ,new-t* (void))] ...)
+                 (make-begin
+                   `((global-set! ,lab* ,global*) ...
+                     ,((Expr (append as* assigned) outmost) expr))))))]
           [(letrec ([,uvar* ,[expr*]] ...) ,[expr]) `(letrec ([,uvar* ,expr*] ...) ,expr)]
           [(set! ,uvar ,[expr])
-           (if (memq uvar assigned) `(set-car! ,uvar ,expr) `(set! ,uvar ,expr))]
+           (cond [(assq uvar global-label) => (lambda (l) `(global-set! ,(cdr l) ,expr))]
+                 [(memq uvar assigned) `(set-car! ,uvar ,expr)]
+                 [else `(set! ,uvar ,expr)])]
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr))
            (let* ([new-t* (map unique-name as*)]
                   [correspond (map cons as* new-t*)]
@@ -747,17 +812,26 @@
                   [new-bind* (map subst uvar*)])
              `(lambda (,new-bind* ...)
                 ,(make-let `([,as* (cons ,new-t* (void))] ...)
-                   ((Expr (append as* assigned)) expr))))]
+                   ((Expr (append as* assigned) outmost) expr))))]
           [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
           [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
-          [,x (guard (uvar? x)) (if (memq x assigned) `(car ,x) x)]))))
-  (lambda (p) ((Expr '()) p)))
+          [,x (guard (uvar? x))
+            (cond [(assq x global-label) => (lambda (l) `(global-ref ,(cdr l)))]
+                  [(memq x assigned) `(car ,x)]
+                  [else x])]))))
+  (lambda (p)
+    (set! global-label '())
+    (match p
+      [(outmost ,out ,[(Expr '() out) -> e])
+       `(with-global-data ,(map cdr global-label)
+          (outmost ,out ,e))])))
 
 (define optimize-direct-call
   (lambda (e)
     (match e
+      [(with-global-data ,data (outmost ,out ,[e])) `(with-global-data ,data (outmost ,out ,e))]
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
       [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
       [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
@@ -795,11 +869,17 @@
         [(quote ,imm) `(quote ,imm)]
         [(,[Expr -> proc] ,[Expr -> arg*] ...) `(,proc ,arg* ...)]
         [,x x])))
-  Expr)
+  (lambda (p)
+    (match p
+      [(with-global-data ,data
+         (outmost ,out ,[Expr -> e]))
+       `(with-global-data ,data
+          (outmost ,out ,e))])))
 
 (define sanitize-binding-forms
   (lambda (e)
     (match e
+      [(with-global-data ,data (outmost ,out ,[e])) `(with-global-data ,data (outmost ,out ,e))]
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
       [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
       [(let ([,uvar* ,[body*]] ...) ,[body])
@@ -839,40 +919,62 @@
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc f] ,[Expr -> arg* f*] ...)
          (values `(,proc ,arg* ...) (apply union f f*))]
-        [,x (guard (uvar? x)) (values x (list x))])))
+        [,x (guard (uvar? x)) (values x (list x))]
+        [,lab (guard (label? lab)) (values lab '())])))
   (lambda (p)
-    (let-values ([(p^ fv) (Expr p)]) p^)))
+    (match p
+      [(with-global-data ,data (outmost ,out ,[Expr -> e fv]))
+       `(with-global-data ,data (outmost ,out ,e))])))
 
 (define-who convert-closures
+  (define global-label*)
   (define Expr
-    (lambda (e)
-      (match e
-        [(if ,[Expr -> cond] ,[Expr -> conseq] ,[Expr -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Expr -> expr*] ... ,[Expr -> expr])
-         `(begin ,expr* ... ,expr)]
-        [(let ([,uvar* ,[Expr -> body*]] ...) ,[Expr -> body])
-         `(let ([,uvar* ,body*] ...) ,body)]
-        [(letrec ([,uvar* (lambda (,formal** ...)
-                            (free (,fv** ...) ,[Expr -> body*]))] ...)
-           ,[Expr -> body])
-         (let ([cp* (map (lambda (x) (unique-name 'cp)) uvar*)]
-               [lab* (map unique-label uvar*)])
-           `(letrec ([,lab* (lambda (,cp* ,formal** ...)
-                              (bind-free (,cp* ,fv** ...) ,body*))] ...)
-              (closures ([,uvar* ,lab* ,fv** ...] ...) ,body)))]
-        [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim))
-         `(,prim ,rand* ...)]
-        [(call/cc ,[Expr -> expr]) `(call/cc ,expr)]
-        [(quote ,imm) e]
-        [(,[Expr -> proc] ,[Expr -> arg*] ...)
-         (if (uvar? proc)
-             `(,proc ,proc ,arg* ...)
-             (let ([tmp (unique-name 'tmp)])
-               `(let ([,tmp ,proc])
-                  (,tmp ,tmp ,arg* ...))))]
-        [,x (guard (uvar? x)) x])))
-  Expr)
+    (lambda (outmost)
+      (lambda (e)
+        (match e
+          [(if ,[(Expr outmost) -> cond] ,[(Expr outmost) -> conseq] ,[(Expr outmost) -> alter])
+           `(if ,cond ,conseq ,alter)]
+          [(begin ,[(Expr outmost) -> expr*] ... ,[(Expr outmost) -> expr])
+           `(begin ,expr* ... ,expr)]
+          [(let ([,uvar* ,[(Expr outmost) -> body*]] ...) ,[(Expr outmost) -> body])
+           (let* ([global* (intersection uvar* (map car global-label*))]
+                  [lab* (map (lambda (v) (cdr (assq v global-label*))) global*)]) ; slow
+             `(let ([,uvar* ,body*] ...)
+                ,(make-begin `((global-set! ,lab* ,global*) ...
+                               ,body))))]
+          [(letrec ([,uvar* (lambda (,formal** ...)
+                              (free (,fv** ...) ,body*))] ...)
+             ,[(Expr outmost) -> body])
+           (let* ([fv**^ (map (lambda (fv*) (difference fv* outmost)) fv**)]
+                  [new-global* (difference (intersection outmost (apply append fv**)) (map car global-label*))]
+                  [new-lab* (map (lambda (uv) (unique-label (string->symbol (extract-root uv)))) new-global*)]
+                  [cp* (map (lambda (x) (unique-name 'cp)) uvar*)]
+                  [lab* (map unique-label uvar*)])
+             (set! global-label* (append `([,new-global* . ,new-lab*] ...) global-label*))
+             `(letrec ([,lab* (lambda (,cp* ,formal** ...)
+                                (bind-free (,cp* ,fv**^ ...) ,(map (Expr outmost) body*)))] ...)
+                (closures ([,uvar* ,lab* ,fv**^ ...] ...) ,body)))]
+          [(,prim ,[(Expr outmost) -> rand*] ...) (guard (primitive? prim))
+           `(,prim ,rand* ...)]
+          [(call/cc ,[(Expr outmost) -> expr]) `(call/cc ,expr)]
+          [(quote ,imm) e]
+          [(,[(Expr outmost) -> proc] ,[(Expr outmost) -> arg*] ...)
+           (if (uvar? proc)
+               `(,proc ,proc ,arg* ...)
+               (let ([tmp (unique-name 'tmp)])
+                 `(let ([,tmp ,proc])
+                    (,tmp ,tmp ,arg* ...))))]
+          [,x (guard (uvar? x))
+            (cond [(assq x global-label*) => (lambda (l) `(global-ref ,(cdr l)))]
+                  [else x])]
+          [,lab (guard (label? lab)) lab]))))
+  (lambda (p)
+    (set! global-label* '())
+    (match p
+      [(with-global-data (,lab* ...)
+         (outmost ,out ,[(Expr out) -> e]))
+       `(with-global-data (,@(map cdr global-label*) ,lab* ...)
+          (outmost ,out ,e))])))
 
 (define-who optimize-known-call
   (define Expr
@@ -902,10 +1004,15 @@
            (if (memq proc known)
                `(,(unique-label proc) ,arg* ...)
                `(,proc ,arg* ...))]
-          [,x (guard (uvar? x)) x]))))
+          [,x (guard (uvar? x)) x]
+          [,lab (guard (label? lab)) lab]))))
   (lambda (p)
     (if *closure-optimization-enabled*
-        ((Expr '()) p)
+        (match p
+          [(with-global-data ,data
+             (outmost ,out ,[(Expr '()) -> e]))
+           `(with-global-data ,data
+              (outmost ,out ,e))])
         p)))
 
 (define-who uncover-well-known
@@ -938,8 +1045,9 @@
         [,lab (guard (label? lab)) (values lab '())])))
   (lambda (p)
     (if *closure-optimization-enabled*
-        (let-values ([(p^ u) (Expr p)])
-          p^)
+        (match p
+          [(with-global-data ,data (outmost ,out ,[Expr -> e u]))
+           `(with-global-data ,data (outmost ,out ,e))])
         p)))
 
 (define-who optimize-free
@@ -1008,7 +1116,13 @@
                 (bind-free (,bd* ...)
                   ,((Expr wk-uvar wk-lab) body))))]))))
   (lambda (p)
-    (if *closure-optimization-enabled* ((Expr '() '()) p) p)))
+    (if *closure-optimization-enabled*
+        (match p
+          [(with-global-data ,data
+             (outmost ,out ,[(Expr '() '()) -> e]))
+           `(with-global-data ,data
+              (outmost ,out ,e))])
+        p)))
 
 (define-who optimize-self-reference
   (define Expr
@@ -1054,7 +1168,14 @@
            `(lambda (,cp ,fml* ...)
               (bind-free (,cp ,@(remq self fv*))
                 ,((Expr self cp) body)))]))))
-  (lambda (p) (if *closure-optimization-enabled* ((Expr #f #f) p) p)))
+  (lambda (p)
+    (if *closure-optimization-enabled*
+        (match p
+          [(with-global-data ,data
+             (outmost ,out ,[(Expr #f #f) -> e]))
+           `(with-global-data ,data
+              (outmost ,out ,e))])
+        p)))
 
 (define-who introduce-procedure-primitives
   (define closure-length) ; actually free-variable length
@@ -1101,8 +1222,9 @@
            `(,prim ,rand* ...)]
           [(call/cc ,[(Expr cp fvs) -> expr]) `(call/cc ,expr)]
           [(quote ,imm) e]
+          [(outmost ,out ,[(Expr cp fvs) -> e]) `(outmost ,out ,e)]
           [(,[(Expr cp fvs) -> proc] ,[(Expr cp fvs) -> arg*] ...)
-           (if (label? proc) ; in the presence of optimize-known-call
+           (if (label? proc)            ; in the presence of optimize-known-call
                `(,proc ,arg* ...)
                `((procedure-code ,proc) ,arg* ...))]
           [,x (guard (uvar? x))
@@ -1112,11 +1234,12 @@
           [,lab (guard (label? lab)) lab]))))
   (lambda (x)
     (set! closure-length '())
-    (let ([x^ ((Expr #f '()) x)])
-      `(with-closure-length ,(if *collection-enabled*
-                                 closure-length
-                                 '())
-         ,x^))))
+    (match x
+      [(with-global-data ,data
+         (outmost ,out ,[(Expr #f '()) -> e]))
+       `(with-closure-length ,(if *collection-enabled* closure-length '())
+          (with-global-data ,data
+            (outmost ,out ,e)))])))
 
 (define-who lift-letrec
   (define Expr
@@ -1139,10 +1262,13 @@
         [,x (values x '())])))
   (lambda (p)
     (match p
-      [(with-closure-length ,closure-length ,body)
-       (let-values ([(body^ binds) (Expr body)])
-         `(with-closure-length ,closure-length
-            (letrec ,binds ,body^)))])))
+      [(with-closure-length ,closure-length
+         (with-global-data ,data
+           (outmost ,out ,[Expr -> body binds])))
+       `(with-closure-length ,closure-length
+          (with-global-data ,data
+            (outmost ,out
+              (letrec ,binds ,body))))])))
 
 (define-who normalize-context
   (define Value
@@ -1216,13 +1342,26 @@
   (lambda (p)
     (match p
       [(with-closure-length ,closure-length
-         (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...)
-           ,[Value -> body]))
+         (with-global-data ,data
+           (outmost ,out
+             (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...)
+               ,[Value -> body]))))
        `(with-closure-length ,closure-length
-          (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...)
-            ,body))])))
+          (with-global-data ,data
+            (outmost ,out
+              (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...)
+                ,body))))])))
 
 (define-who specify-representation
+  (define call/cc-label)
+  (define write-label)
+  (define inspect-label)
+
+  (define current-dump-length)
+  (define symbol->index)
+
+  (define complex-datum-label*)
+
   (define specify-complex
     (lambda (?complex)
       (cond [(pair? ?complex)
@@ -1231,14 +1370,7 @@
             [(vector? ?complex)
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
-  (define call/cc-label)
-  (define write-label)
-  (define inspect-label)
-  (define current-dump-length)
-  (define symbol->index)
-  (define label-complex-disp*)
-  (define root-label)
-  (define n-complex)
+
   (define offset-car (- disp-car tag-pair))
   (define offset-cdr (- disp-cdr tag-pair))
   (define offset-vector-length (- disp-vector-length tag-vector))
@@ -1274,6 +1406,7 @@
          (if (integer? ind)
              `(mref ,vec ,(+ offset-vector-data ind))
              `(mref ,vec (+ ,offset-vector-data ,ind)))]
+        [(global-ref ,lab) `(mref ,lab 0)]
         [(cons ,[Value -> e1] ,[Value -> e2])
          (let* ([tmp-car (unique-name 'tmp)]
                 [tmp-cdr (unique-name 'tmp)]
@@ -1344,6 +1477,7 @@
         [(write ,[Value -> expr]) `(,write-label ,expr)]
         [(inspect ,[Value -> expr]) `(,inspect-label ,expr)]
         [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
+        [(global-set! ,lab ,[Value -> e]) `(mset! ,lab 0 ,e)]
         [(set-car! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-car ,e)]
         [(set-cdr! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-cdr ,e)]
         [(procedure-set! ,[Value -> proc] ,[Value -> ind] ,[Value -> e])
@@ -1371,44 +1505,43 @@
                            (+ tag-symbol (ash index shift-fixnum)))])]
             [(integer? i) (ash i shift-fixnum)]
             [else
-              (let ([lab (unique-label 'complex)]
-                    [disp (+ disp-root-globals
-                            (ash n-complex align-shift))])
-                (set! label-complex-disp*
+              (let ([complex (unique-label 'code)]
+                    [lab (unique-label 'literal)])
+                (set! complex-datum-label*
                   (cons
-                    (list lab (specify-complex i) disp)
-                    label-complex-disp*))
-                (set! n-complex (add1 n-complex))
-                `(mref ,root-label ,disp))])))
+                    (list complex (specify-complex i) lab)
+                    complex-datum-label*))
+                `(mref ,lab ,0))])))
   (lambda (p)
     (set! current-dump-length 0)
     (set! symbol->index '())
-    (set! label-complex-disp* '())
+    (set! complex-datum-label* '())
+
     (set! call/cc-label (unique-label 'call/cc))
     (set! write-label (unique-label 'write))
     (set! inspect-label (unique-label 'inspect))
-    (set! root-label (unique-label 'root))
-    (set! n-complex 0)
+    (set! decode-literal-label (unique-label 'decode-literal))
+
     (match p
       [(with-closure-length ,closure-length
-         (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
-           ,[Value -> body]))
-       (match label-complex-disp*
-         [([,lab* ,complex* ,disp*] ...)
-          (let* ([decode-literal-label (unique-label 'decode-literal)]
-                 [l* (map (lambda (v) decode-literal-label) lab*)])
+         (with-global-data (,glab* ...)
+           (outmost ,out
+             (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
+               ,[Value -> body]))))
+       (match complex-datum-label*
+         [([,complex* ,code* ,lab*] ...)
+          (let ([l* (map (lambda (v) decode-literal-label) lab*)])
             `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
                                 [,call/cc-label "_scheme_call_with_current_continuation"]
                                 [,write-label "_scheme_write"]
-                                [,inspect-label "_scheme_inspect"]
-                                [,root-label "_scheme_roots"])
+                                [,inspect-label "_scheme_inspect"])
                (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                                   (reverse symbol->index))]
-                                  [,lab* (encode-literal (quote ,complex*))] ...
-                                  [roots-length ,(+ disp-root-globals (ash n-complex align-shift))])
+                                  [,complex* (encode-literal (quote ,code*))] ...
+                                  [roots (,lab* ... ,glab* ...)])
                  (with-closure-length ,closure-length
                    (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
-                     (begin (,l* ,lab* ,disp*) ...
+                     (begin (,l* ,complex* ,lab*) ...
                             ,body))))))])])))
 
 (define-who uncover-locals
@@ -2433,6 +2566,9 @@
                                 (Effect `(begin (set! ,temp ,expr)
                                                 (mset! ,base ,offset ,temp)))])
                     (values eff (cons temp u))))]
+               [(or (and (label? base) (number? offset) (zero? offset))
+                    (and (label? offset) (number? base) (zero? base)))
+                (values e '())]
                [(and (very-trivial? base)
                      (very-trivial? offset)
                      (or (not (int32? base)) (not (int32? offset))))
@@ -2456,6 +2592,9 @@
                     (values
                       (make-begin (cons eff `((set! ,v ,temp))))
                       (cons temp u))))]
+               [(or (and (label? base) (number? offset) (zero? offset))
+                    (and (label? offset) (number? base) (zero? base)))
+                (values e '())]
                [(and (very-trivial? base)
                      (very-trivial? offset)
                      (or (not (int32? base)) (not (int32? offset))))
@@ -3161,51 +3300,6 @@
   (define Triv Var)
   Program)
 
-(define-who expose-memory-operands
-  (define do-translation
-    (lambda (base offset)
-      (cond [(int32? base) (make-disp-opnd offset base)]
-            [(int32? offset) (make-disp-opnd base offset)]
-            [else (make-index-opnd base offset)])))
-  (define Tail
-    (lambda (t)
-      (match t
-        [(if ,[Pred -> pred] ,[Tail -> conseq] ,[Tail -> alter])
-         `(if ,pred ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
-         `(begin ,effect* ... ,tail)]
-        [,x x])))
-  (define Pred
-    (lambda (p)
-      (match p
-        [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred  -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
-         `(begin ,effect* ... ,pred)]
-        [,x x])))
-  (define Effect
-    (lambda (e)
-      (match e
-        [(mset! ,base ,offset ,expr)
-         `(set! ,(do-translation base offset) ,expr)]
-        [(set! ,v (mref ,base ,offset))
-         `(set! ,v ,(do-translation base offset))]
-        [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
-         `(begin ,effect* ... ,effect)]
-        [,x x])))
-  (lambda (p)
-    (match p
-      [(with-label-alias ,label-alias
-         (with-global-data ,data
-           (with-closure-length ,closure-length
-             (letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body]))))
-       `(with-label-alias ,label-alias
-          (with-global-data ,data
-            (with-closure-length ,closure-length
-              (letrec ([,label* (lambda () ,body*)] ...) ,body))))])))
-
 (define-who expose-basic-blocks
   (define frame-information)
   (define Program
@@ -3423,6 +3517,10 @@
   (define Effect
     (lambda (e)
       (match e
+        [(mset! ,v ,[Triv -> base] ,[Triv -> offset])
+         `(mset! ,v ,base ,offset)]
+        [(set! ,v (mref ,[Triv -> base] ,[Triv -> offset]))
+         `(set! ,v (mref ,base ,offset))]
         [(set! ,v1 (,rator ,[Triv -> v1] ,[Triv -> v2]))
          `(set! ,v1 (,rator ,v1 ,v2))]
         [(set! ,v1 ,[Triv -> v2])
@@ -3450,6 +3548,7 @@
   (define Expr
     (lambda (x)
       (match x
+        [(with-global-data ,data (outmost ,out ,[e])) e]
         [,label (guard (label? label)) '()]
         [,uvar (guard (uvar? uvar)) '()]
         [(quote ,imm) '()]
@@ -3514,12 +3613,14 @@
       (printf "\n** Options **
         garbage collection:            ~a
         encode large literal:          ~a
+        optimize globals:              ~a
         iterated register coalescing:  ~a
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
               (bool->word *collection-enabled*)
               (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
+              (bool->word *optimize-global-enabled*)
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
               (bool->word *cp-1-enabled*)
@@ -3623,6 +3724,11 @@
        (reverse-sweep))]))
 
 (define-who generate-x86-64
+  (define BaseOffset
+    (lambda (base offset)
+      (cond [(int32? base) (make-disp-opnd offset base)]
+            [(int32? offset) (make-disp-opnd base offset)]
+            [else (make-index-opnd base offset)])))
   (define Program
     (lambda (p)
       (match p
@@ -3636,6 +3742,11 @@
            (emit-static-data data*)
            (emit '.text)
            (emit-program (emit* stmt*)))])))
+  (define Label
+    (lambda (lab)
+      (if (string? lab)
+          (format "L~a(%rip)" lab)
+          (rand->x86-64-arg lab))))
   (define Statement
     (lambda (s)
       (match s
@@ -3662,11 +3773,26 @@
         [(if (not (,rel ,x ,y)) (jump ,dst))
          (emit 'cmpq y x)
          (emit-jump (not-rel->assembly rel) dst)]
+        [(mset! ,base ,offset ,expr)
+         (cond [(and (or (label? base) (string? base))
+                     (number? offset) (zero? offset))
+                (emit 'movq (rand->x86-64-arg expr) (Label base))]
+               [(and (or (label? offset) (string? offset))
+                     (number? base) (zero? base))
+                (emit 'movq (rand->x86-64-arg expr) (Label offset))]
+               [else (Statement `(set! ,(BaseOffset base offset) ,expr))])]
+        [(set! ,v (mref ,base ,offset))
+         (cond [(and (or (label? base) (string? base))
+                     (number? offset) (zero? offset))
+                (emit 'movq (Label base) (rand->x86-64-arg v))]
+               [(and (or (label? offset) (string? offset))
+                     (number? base) (zero? base))
+                (emit 'movq (Label offset) (rand->x86-64-arg v))]
+               [else (Statement `(set! ,v ,(BaseOffset base offset)))])]
         [(set! ,v1 (,rator ,v1 ,v2))
          (emit (binop->assembly rator) v2 v1)]
         [(set! ,v1 ,v2)
-         (cond [(label? v2) (emit 'leaq v2 v1)]
-               [(string? v2) (emit 'leaq (format "~a(%rip)" v2) v1)]
+         (cond [(or (label? v2) (string? v2)) (emit 'leaq (Label v2) v1)]
                [else (emit 'movq v2 v1)])])))
   Program)
 
@@ -3719,12 +3845,16 @@
                      (Char #\x00))
                    sym*))
                (printf "\n")))]
-        [(roots-length ,n)
+        [(roots (,root* ...))
          (emit '.align "8")
          (emit '.globl "_scheme_roots")
          (emit-label "_scheme_roots")
-         (emit '.quad (number->string n))
-         (emit '.zero (number->string n))]
+         (emit '.quad (number->string (ash (length root*) align-shift)))
+         (for-each
+           (lambda (lab)
+             (emit-label lab)
+             (emit '.quad "0"))
+           root*)]
         [(,lab (encode-literal (quote ,complex)))
          (emit-label lab)
          (printf "    .quad 0x")
@@ -3738,6 +3868,7 @@
   parse-scheme
   proceduralize-primitive
   optimize-direct-call
+  uncover-outmost
   uncover-assigned
   purify-letrec
   optimize-constant
@@ -3778,7 +3909,6 @@
   discard-call-live
   finalize-locations
   expose-frame-var
-  expose-memory-operands
   expose-basic-blocks
   optimize-jumps
   flatten-program

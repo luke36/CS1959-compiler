@@ -83,8 +83,7 @@ DL_DL_RETURN_OR_UP:
     movq %rbx, %rax
     jmp DL_GO_UP
 DL_RETURN:
-    leaq _scheme_roots(%rip), %r10
-    movq %rax, 0(%r9, %r10)
+    movq %rax, 0(%r9)
     jmp *%r15
 
     .globl _scheme_symbol_to_address
