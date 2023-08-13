@@ -17,13 +17,14 @@
 (load "fmts.pretty")
 (load "a15-wrapper.scm")
 
+(define *standard* 'r6rs)
 (define *cp-1-enabled* #t)
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
 (define *optimize-global-enabled* #t)
 (define *max-inline-literal-size* 0)
-(define *collection-enabled* #t)
+(define *collection-enabled* #f)
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
 (define disp-root-globals 0)
@@ -431,8 +432,12 @@
                (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*)) ; just a temporary solution
              '())]
         [(letrec ([,uvar* ,e*] ...) ,[o])
-         (apply append o
-           (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*))]
+         (if (or (eq? *standard* 'r6rs) (for-all non-capture? e*))
+             (apply append o
+               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*))
+             (map car
+               (filter (lambda (bd) (not (lambda? (cdr bd))))
+                 `([,uvar* . ,e*] ...))))]
         [(set! ,uvar ,[o]) o]
         [(lambda (,uvar* ...) ,body) '()]
         [(,prim ,o* ...) (guard (primitive? prim)) '()]
@@ -495,7 +500,7 @@
            (andmap (simple? x* reduc-now?) (cons expr expr*))]
           [(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))
            (andmap (simple? x* reduc-now?) (cons expr expr*))]
-          [(letrec ([,uvar* ,expr*] ...) (assigned (,as* ...) ,body)) #f]
+          [(letrec ([,uvar* ,expr*] ...) ,body) ((simple? x* reduc-now?) body)]
           [(set! ,uvar ,expr) ((simple? x* reduc-now?) expr)]
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f) expr)]
           [(,prim ,rand* ...) (guard (primitive? prim))
@@ -503,8 +508,9 @@
           [(call/cc ,expr) #f]
           [(quote ,imm) #t]
           [(,proc ,arg* ...)
-           ;; (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*)))
-           (andmap (simple? x* reduc-now?) (cons proc arg*))] ; r6rs
+           (if (eq? *standard* 'r6rs)
+               (andmap (simple? x* reduc-now?) (cons proc arg*))
+               (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*))))]
           [,x (guard (uvar? x)) (not (memq x x*))]))))
   (define partition
     (lambda (x* b* as*)
@@ -515,7 +521,7 @@
             (let-values ([(simple* lambda* complex*) (partition x* (cdr b*) as*)])
               (cond [(memq x as*) (values simple* lambda* (cons b complex*))]
                     [(lambda? e) (values simple* (cons b lambda*) complex*)]
-                    [(simple? x* e) (values (cons b simple*) lambda* complex*)]
+                    [((simple? x* #t) e) (values (cons b simple*) lambda* complex*)]
                     [else (values simple* lambda* (cons b complex*))]))))))
   (lambda (e)
     (match e
@@ -3619,6 +3625,7 @@
                 [*all-code-size* '()])
       (test-all #f)
       (printf "\n** Options **
+        scheme standard:               ~a
         garbage collection:            ~a
         encode large literals:         ~a
         optimize globals:              ~a
@@ -3626,6 +3633,7 @@
         closure optimization:          ~a
         pre-optimization:              ~a
         optimize jumps:                ~a\n\n"
+              *standard*
               (bool->word *collection-enabled*)
               (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
               (bool->word *optimize-global-enabled*)

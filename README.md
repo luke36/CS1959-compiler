@@ -28,8 +28,9 @@ Comparison:
 
 ;; mine
 ** Options **
+        scheme standard:               r5rs
         garbage collection:            No
-        encode large literal:          No
+        encode large literals:         No
         optimize globals:              No
         iterated register coalescing:  Yes
         closure optimization:          Yes
@@ -42,21 +43,22 @@ Comparison:
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5780
-       average code length:  35.24390243902439
+       total code length:    5798
+       average code length:  35.353658536585364
 (time (test-all-analyze))
     62 collections
-    0.188350952s elapsed cpu time, including 0.006983826s collecting
-    0.188802094s elapsed real time, including 0.007159432s collecting
-    520955408 bytes allocated, including 521337056 bytes reclaimed
+    0.186370017s elapsed cpu time, including 0.003754762s collecting
+    0.186402211s elapsed real time, including 0.003896082s collecting
+    522822768 bytes allocated, including 521024016 bytes reclaimed
 ```
 
 the best I can do is:
 
 ``` text
 ** Options **
+        scheme standard:               r6rs
         garbage collection:            No
-        encode large literal:          Above 0
+        encode large literals:         Above 0
         optimize globals:              Yes
         iterated register coalescing:  Yes
         closure optimization:          Yes
