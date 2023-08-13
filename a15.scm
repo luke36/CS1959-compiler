@@ -24,6 +24,7 @@
 (define *optimize-global-enabled* #t)
 (define *max-inline-literal-size* 0)
 (define *collection-enabled* #t)
+(define *max-conservative-range* #f) ; may ask for more space than actually needed
 
 (define disp-root-globals 0)
 (define stack-base-register 'r14)
@@ -380,74 +381,22 @@
     (let ([p^ (Expr p)])
       (make-letrec (map cdr bindings) p^))))
 
-(define-who convert-complex-datum
-  (define size
-    (lambda (d)
-      (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
-            [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
-            [else 1])))
-  (define bindings)
-  (define fillings)
-  (define do-conversion
-    (lambda (const)
-      (cond
-        [(and (pair? const))
-         `(cons
-            ,(do-conversion (car const))
-            ,(do-conversion (cdr const)))]
-        [(vector? const)
-         (let* ([tmp (unique-name 'tmp)]
-                [length (vector-length const)]
-                [fill (let loop ([i 0])
-                        (cond [(< i length)
-                               (cons
-                                 `(vector-set! ,tmp (quote ,i) ,(do-conversion (vector-ref const i)))
-                                 (loop (add1 i)))]
-                              [else '()]))])
-           `(let ([,tmp (make-vector (quote ,length))])
-              ,(make-begin `(,@fill ,tmp))))]
-        [else `(quote ,const)])))
-  (define remove-last
-    (lambda (l)
-      (cond [(null? (cdr l)) '()]
-            [else (cons (car l) (remove-last (cdr l)))])))
-  (define Expr
-    (lambda (e)
-      (match e
-        [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
-        [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
-        [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
-        [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
-        [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
-        [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-        [(call/cc ,[expr]) `(call/cc ,expr)]
-        [(quote ,imm)
-         (if (and (or (pair? imm) (vector? imm))
-                  (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
-             (let ([imm^ (do-conversion imm)])
-               (cond [(and (pair? imm))
-                      (let ([tmp (unique-name 'tmp)])
-                        (set! bindings (cons `(,tmp ,imm^) bindings))
-                        tmp)]
-                     [(vector? imm)
-                      (set! bindings (cons (caadr imm^) bindings))
-                      (set! fillings (append (remove-last (cdaddr imm^)) fillings))
-                      (caaadr imm^)]))
-             `(quote ,imm))]
-        [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
-        [,x (guard (uvar? x)) x]
-        [,lab (guard (label? lab)) lab])))
-  (lambda (p)
-    (set! bindings '())
-    (set! fillings '())
-    (match p
-      [(with-global-data ,data
-         (outmost ,out ,[Expr -> e]))
-       `(with-global-data ,data
-          (outmost ,out
-            ,(make-let bindings
-               (make-begin `(,fillings ... ,e)))))])))
+(define optimize-direct-call
+  (lambda (e)
+    (match e
+      [(with-global-data ,data (outmost ,out ,[e])) `(with-global-data ,data (outmost ,out ,e))]
+      [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
+      [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
+      [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
+      [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
+      [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
+      [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+      [(call/cc ,[expr]) `(call/cc ,expr)]
+      [(quote ,imm) `(quote ,imm)]
+      [((lambda (,uvar* ...) ,[body]) ,[arg*] ...)
+       (make-let `([,uvar* ,arg*] ...) body)]
+      [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
+      [,x x])))
 
 (define-who uncover-outmost
   (define non-capture?
@@ -828,22 +777,74 @@
        `(with-global-data ,(map cdr global-label)
           (outmost ,out ,e))])))
 
-(define optimize-direct-call
-  (lambda (e)
-    (match e
-      [(with-global-data ,data (outmost ,out ,[e])) `(with-global-data ,data (outmost ,out ,e))]
-      [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
-      [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
-      [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
-      [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
-      [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
-      [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-      [(call/cc ,[expr]) `(call/cc ,expr)]
-      [(quote ,imm) `(quote ,imm)]
-      [((lambda (,uvar* ...) ,[body]) ,[arg*] ...)
-       (make-let `([,uvar* ,arg*] ...) body)]
-      [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
-      [,x x])))
+(define-who convert-complex-datum
+  (define size
+    (lambda (d)
+      (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
+            [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
+            [else 1])))
+  (define bindings)
+  (define fillings)
+  (define do-conversion
+    (lambda (const)
+      (cond
+        [(and (pair? const))
+         `(cons
+            ,(do-conversion (car const))
+            ,(do-conversion (cdr const)))]
+        [(vector? const)
+         (let* ([tmp (unique-name 'tmp)]
+                [length (vector-length const)]
+                [fill (let loop ([i 0])
+                        (cond [(< i length)
+                               (cons
+                                 `(vector-set! ,tmp (quote ,i) ,(do-conversion (vector-ref const i)))
+                                 (loop (add1 i)))]
+                              [else '()]))])
+           `(let ([,tmp (make-vector (quote ,length))])
+              ,(make-begin `(,@fill ,tmp))))]
+        [else `(quote ,const)])))
+  (define remove-last
+    (lambda (l)
+      (cond [(null? (cdr l)) '()]
+            [else (cons (car l) (remove-last (cdr l)))])))
+  (define Expr
+    (lambda (e)
+      (match e
+        [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
+        [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
+        [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
+        [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
+        [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
+        [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
+        [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(call/cc ,[expr]) `(call/cc ,expr)]
+        [(quote ,imm)
+         (if (and (or (pair? imm) (vector? imm))
+                  (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
+             (let ([imm^ (do-conversion imm)])
+               (cond [(and (pair? imm))
+                      (let ([tmp (unique-name 'tmp)])
+                        (set! bindings (cons `(,tmp ,imm^) bindings))
+                        tmp)]
+                     [(vector? imm)
+                      (set! bindings (cons (caadr imm^) bindings))
+                      (set! fillings (append (remove-last (cdaddr imm^)) fillings))
+                      (caaadr imm^)]))
+             `(quote ,imm))]
+        [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
+        [,x (guard (uvar? x)) x]
+        [,lab (guard (label? lab)) lab])))
+  (lambda (p)
+    (set! bindings '())
+    (set! fillings '())
+    (match p
+      [(with-global-data ,data
+         (outmost ,out ,[Expr -> e]))
+       `(with-global-data ,data
+          (outmost ,out
+            ,(make-let bindings
+               (make-begin `(,fillings ... ,e)))))])))
 
 (define-who remove-anonymous-lambda
   (define let-rhs
@@ -1894,80 +1895,87 @@
       (match b
         [(locals (,uvar* ...) ,tail)
          (set! new-local* '())
-         (let-values ([(tail^ n) (Tail tail)])
+         (let-values ([(tail^ l h) (Tail tail)])
            `(locals (,uvar* ... ,new-local* ...)
-              ,(wrap-with tail^ n)))])))
+              ,(wrap-with tail^ h)))])))
   (define Tail
     (lambda (t)
       (match t
-        [(if ,cond ,[Tail -> conseq n1] ,[Tail -> alter n2])
-         (if (= n1 n2)
-             (let-values ([(cond^ n) ((Pred n1) cond)])
-               (values `(if ,cond^ ,conseq ,alter) n))
-             (let-values ([(cond^ n3) ((Pred 0) cond)])
-               (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
-        [(begin ,eff* ... ,[Tail -> tail n])
-         (let-values ([(eff*^ n^) ((Effect* n) eff*)])
-           (values (make-begin `(,eff*^ ... ,tail)) n^))]
+        [(if ,cond ,[Tail -> conseq l1 h1] ,[Tail -> alter l2 h2])
+         (if (or (not *max-conservative-range*)
+                   (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
+             (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
+               (values `(if ,cond^ ,conseq ,alter) l h))
+             (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
+               (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
+        [(begin ,eff* ... ,[Tail -> tail l h])
+         (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
+           (values (make-begin `(,eff*^ ... ,tail)) l^ h^))]
         [(alloc ,expr)
          (if (number? expr)
-             (values e expr)
-             (values (wrap-with e expr) 0))]
-        [,x (values x 0)])))
+             (values e expr expr)
+             (values (wrap-with e expr) 0 0))]
+        [,x (values x 0 0)])))
   (define Pred
-    (lambda (post)
+    (lambda (c-low c-high a-low a-high)
       (lambda (p)
         (match p
-          [(if ,cond ,[(Pred post) -> conseq n1] ,[(Pred post) -> alter n2])
-           (if (= n1 n2)
-               (let-values ([(cond^ n) ((Pred n1) cond)])
-                 (values `(if ,cond^ ,conseq ,alter) n))
-               (let-values ([(cond^ n3) ((Pred 0) cond)])
-                 (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
-          [(begin ,eff* ... ,[(Pred post) -> pred n])
-           (let-values ([(eff*^ n^) ((Effect* n) eff*)])
-             (values (make-begin `(,eff*^ ... ,pred)) n^))]
-          [,x (values x post)]))))
+          [(true) (values p c-low c-high)]
+          [(false) (values p a-low a-high)]
+          [(if ,cond
+               ,[(Pred c-low c-high a-low a-high) -> conseq l1 h1]
+               ,[(Pred c-low c-high a-low a-high) -> alter l2 h2])
+           (if (or (not *max-conservative-range*)
+                   (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
+               (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
+                 (values `(if ,cond^ ,conseq ,alter) l h))
+               (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
+                 (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
+          [(begin ,eff* ... ,[(Pred c-low c-high a-low a-high) -> pred l h])
+           (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
+             (values (make-begin `(,eff*^ ... ,pred)) l^ h^))]
+          [,x (values x (min c-low a-low) (max c-high a-high))]))))
   (define Effect
-    (lambda (post)
+    (lambda (low high)
       (lambda (e)
         (match e
           [(set! ,uvar (alloc ,expr))
            (if (number? expr)
-               (values e (+ post expr))
-               (values (wrap-with e (list expr post)) 0))]
+               (values e (+ low expr) (+ high expr))
+               (values (wrap-with e (list expr high)) 0 0))]
           [(mset! ,base ,offset (alloc ,expr))
            (if (number? expr)
-               (values e (+ post expr))
-               (values (wrap-with e (list expr post)) 0))]
+               (values e (+ low expr) (+ high expr))
+               (values (wrap-with e (list expr high)) 0 0))]
           [(set! ,uvar (,proc ,args* ...)) (guard (and (not (binop? proc))
                                                        (not (eq? proc 'mref))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
           [(mset! ,base ,offset (,proc ,args* ...)) (guard (and (not (binop? proc))
                                                                 (not (eq? proc 'mref))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
           [(,proc ,arg* ...) (guard (and (not (eq? proc 'set!))
                                          (not (eq? proc 'mset!))
                                          (not (eq? proc 'nop))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) post))) 0)]
-          [(if ,cond ,[(Effect post) -> conseq n1] ,[(Effect post) -> alter n2])
-           (if (= n1 n2)
-               (let-values ([(cond^ n) ((Pred n1) cond)])
-                 (values `(if ,cond^ ,conseq ,alter) n))
-               (let-values ([(cond^ n3) ((Pred 0) cond)])
-                 (values `(if ,cond^ ,(wrap-with conseq n1) ,(wrap-with alter n2)) n3)))]
-          [(begin ,eff* ... ,[(Effect post) -> eff n])
-           (let-values ([(eff*^ n^) ((Effect* n) eff*)])
-             (values (make-begin `(,eff*^ ... ,eff)) n^))]
-          [,x (values x post)]))))
+           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
+          [(if ,cond ,[(Effect low high) -> conseq l1 h1] ,[(Effect low high) -> alter l2 h2])
+           (if (or (not *max-conservative-range*)
+                   (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
+               (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
+                 (values `(if ,cond^ ,conseq ,alter) l h))
+               (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
+                 (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
+          [(begin ,eff* ... ,[(Effect low high) -> eff l h])
+           (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
+             (values (make-begin `(,eff*^ ... ,eff)) l^ h^))]
+          [,x (values x low high)]))))
   (define Effect*
-    (lambda (post)
+    (lambda (low high)
       (lambda (e*)
         (if (null? e*)
-            (values '() post)
-            (let*-values ([(d n) ((Effect* post) (cdr e*))]
-                          [(a n^) ((Effect n) (car e*))])
-              (values (cons a d) n^))))))
+            (values '() low high)
+            (let*-values ([(d l h) ((Effect* low high) (cdr e*))]
+                          [(a l^ h^) ((Effect l h) (car e*))])
+              (values (cons a d) l^ h^))))))
   (lambda (p)
     (if *collection-enabled*
         (begin
@@ -3612,7 +3620,7 @@
       (test-all #f)
       (printf "\n** Options **
         garbage collection:            ~a
-        encode large literal:          ~a
+        encode large literals:         ~a
         optimize globals:              ~a
         iterated register coalescing:  ~a
         closure optimization:          ~a

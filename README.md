@@ -75,7 +75,7 @@ the best I can do is:
 
 but with extra runtime supports.
 
-### additional features:
+### additional features
 - simple IO
 - several syntactic extensions
 - basic symbol manipulation
