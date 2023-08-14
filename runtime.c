@@ -383,7 +383,6 @@ ptr inspect(ptr x) {
 
 ptr scheme_write(ptr x) {
   print(x);
-  printf("\n");
   return _void;
 }
 

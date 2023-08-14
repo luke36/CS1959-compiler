@@ -66,13 +66,13 @@ the best I can do is:
         optimize jumps:                Yes
 
 ** closure analysis report **
-       total closures created:  69
-       total free var:          64
-       average free var:        0.927536231884058
+       total closures created:  67
+       total free var:          56
+       average free var:        0.835820895522388
 
 ** code length report **
-       total code length:    5173
-       average code length:  31.54268292682927
+       total code length:    5094
+       average code length:  31.0609756097561
 ```
 
 but with extra runtime supports.

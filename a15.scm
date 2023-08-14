@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); interaction between call/cc and gc
+;; todo: add trap-return-point (not now); interaction between call/cc and gc; is optimize-global (mostly) subsumed by a strong enough partial evaluator?
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -399,55 +399,6 @@
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x x])))
 
-(define-who uncover-outmost
-  (define non-capture?
-    (lambda (e)
-      (match e
-        [(if ,cond ,conseq ,alter)
-         (and (non-capture? cond)
-              (non-capture? conseq)
-              (non-capture? alter))]
-        [(begin ,expr* ... ,expr)
-         (andmap non-capture? (cons expr expr*))]
-        [(let ([,uvar* ,expr*] ...) ,expr)
-         (andmap non-capture? (cons expr expr*))]
-        [(letrec ([,uvar* ,expr*] ...) ,expr)
-         (andmap non-capture? (cons expr expr*))]
-        [(set! ,uvar ,expr) (non-capture? expr)]
-        [(lambda (,uvar* ...) ,expr) #t]
-        [(,prim ,rand* ...) (guard (primitive? prim))
-         (for-all non-capture? rand*)]
-        [(call/cc ,expr) #f]
-        [(quote ,imm) #t]
-        [(,proc ,arg* ...) #f]
-        [,x (guard (uvar? x)) #t])))
-  (define Expr
-    (lambda (e)
-      (match e
-        [(if ,[o1] ,o2 ,o3) o1]
-        [(begin ,[o] ,o*) o]
-        [(let ([,uvar* ,e*] ...) ,e)
-         (if (for-all non-capture? e*)
-             (apply append (Expr e)
-               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*)) ; just a temporary solution
-             '())]
-        [(letrec ([,uvar* ,e*] ...) ,[o])
-         (if (or (eq? *standard* 'r6rs) (for-all non-capture? e*))
-             (apply append o
-               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*))
-             (map car
-               (filter (lambda (bd) (not (lambda? (cdr bd))))
-                 `([,uvar* . ,e*] ...))))]
-        [(set! ,uvar ,[o]) o]
-        [(lambda (,uvar* ...) ,body) '()]
-        [(,prim ,o* ...) (guard (primitive? prim)) '()]
-        [(call/cc ,[o]) o]
-        [(quote ,imm) '()]
-        [(,o ,o* ...) '()]
-        [,x (guard (uvar? x)) '()])))
-  (lambda (p)
-    `(outmost ,(if *optimize-global-enabled* (Expr p) '()) ,p)))
-
 (define-who uncover-assigned
   (define Expr
     (lambda (e)
@@ -484,8 +435,7 @@
         [,x (guard (uvar? x)) (values x '())])))
   (lambda (p)
     (match p
-      [(outmost ,out ,[Expr -> e a])
-       `(outmost ,out ,e)])))
+      [,[Expr -> e a] e])))
 
 (define-who purify-letrec
   (define simple?
@@ -553,7 +503,6 @@
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
       [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
-      [(outmost ,out ,[e]) `(outmost ,out ,e)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x (guard (uvar? x)) x])))
 
@@ -646,8 +595,7 @@
   (lambda (p)
     (if *cp-1-enabled*
         (match p
-          [(outmost ,out ,[(Expr '()) -> e v])
-           `(outmost ,out ,e)])
+          [,[(Expr '()) -> e v] e])
         p)))
 
 (define-who optimize-useless
@@ -727,9 +675,65 @@
   (lambda (prog)
     (if *cp-1-enabled*
         (match prog
-          [(outmost ,out ,[(Expr 'value) -> e u])
-           `(outmost ,out ,e)])
+          [,[(Expr 'value) -> e u] e])
         prog)))
+
+(define-who uncover-outmost
+  (define non-capture?
+    (lambda (e)
+      (match e
+        [(if ,cond ,conseq ,alter)
+         (and (non-capture? cond)
+              (non-capture? conseq)
+              (non-capture? alter))]
+        [(begin ,expr* ... ,expr)
+         (andmap non-capture? (cons expr expr*))]
+        [(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))
+         (andmap non-capture? (cons expr expr*))]
+        [(letrec ([,uvar* ,expr*] ...) ,expr)
+         (andmap non-capture? (cons expr expr*))]
+        [(set! ,uvar ,expr) (non-capture? expr)]
+        [(lambda (,uvar* ...) ,expr) #t]
+        [(,prim ,rand* ...) (guard (primitive? prim))
+         (for-all non-capture? rand*)]
+        [(call/cc ,expr) #f]
+        [(quote ,imm) #t]
+        [(,proc ,arg* ...) #f]
+        [,x (guard (uvar? x)) #t])))
+  (define Expr
+    (lambda (e)
+      (match e
+        [(if ,cond ,conseq ,alter)
+         (if (non-capture? cond)
+             (append (Expr cond) (Expr conseq) (Expr alter))
+             (Expr cond))]
+        [(begin ,e+ ...)
+         (let loop ([e* e+])
+           (cond [(null? e*) '()]
+                 [(non-capture? (car e*))
+                  (append (Expr (car e*)) (loop (cdr e*)))]
+                 [else (Expr (car e*))]))]
+        [(let ([,uvar* ,e*] ...) (assigned (,as* ...) ,e))
+         (if (for-all non-capture? e*)
+             (apply append (Expr e)
+               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*)) ; just a temporary solution
+             '())]
+        [(letrec ([,uvar* ,e*] ...) ,[o])
+         (if (or (eq? *standard* 'r6rs) (for-all non-capture? e*))
+             (apply append o
+               (map (lambda (uvar e) (if (lambda? e) (Expr e) (cons uvar (Expr e)))) uvar* e*))
+             (map car
+               (filter (lambda (bd) (not (lambda? (cdr bd))))
+                 `([,uvar* . ,e*] ...))))]
+        [(set! ,uvar ,[o]) o]
+        [(lambda (,uvar* ...) ,body) '()]
+        [(,prim ,o* ...) (guard (primitive? prim)) '()]
+        [(call/cc ,[o]) o]
+        [(quote ,imm) '()]
+        [(,o ,o* ...) '()]
+        [,x (guard (uvar? x)) '()])))
+  (lambda (p)
+    `(outmost ,(if *optimize-global-enabled* (Expr p) '()) ,p)))
 
 (define-who convert-assignments
   (define global-label)
@@ -1548,7 +1552,7 @@
                                   [roots (,lab* ... ,glab* ...)])
                  (with-closure-length ,closure-length
                    (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
-                     (begin (,l* ,complex* ,lab*) ...
+                     (begin (mset! ,lab* 0 (,l* ,complex*)) ...
                             ,body))))))])])))
 
 (define-who uncover-locals
@@ -3884,11 +3888,11 @@
   parse-scheme
   proceduralize-primitive
   optimize-direct-call
-  uncover-outmost
   uncover-assigned
   purify-letrec
   optimize-constant
   optimize-useless
+  uncover-outmost
   convert-assignments
   convert-complex-datum
   remove-anonymous-lambda
