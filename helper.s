@@ -185,3 +185,10 @@ _scheme_display:
     call display_ptr
     movq %r12, %rdx
     jmp *%r15
+
+    .globl _scheme_read_char
+_scheme_read_char:
+    call getchar
+    shlq $8, %rax
+    addq $254, %rax
+    jmp *%r15

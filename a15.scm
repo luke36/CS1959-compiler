@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters; separate label-alias and literal encoding from huge specify-representation; read-char
+;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters (not now); separate label-alias and literal encoding from huge specify-representation
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -61,7 +61,7 @@
 (define id (lambda (x) x))
 
 (define binops
-  '(+ - * logand logor sra))
+  '(+ - * logand logor sra ash))
 (define binop?
   (lambda (x)
     (memq x binops)))
@@ -76,7 +76,8 @@
       [* 'imulq]
       [logand 'andq]
       [logor 'orq]
-      [sra 'sarq])))
+      [sra 'sarq]
+      [ash 'shlq])))
 
 (define overflow?
   (lambda (x)
@@ -142,7 +143,7 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer))
+  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char))
 (define predicate-primitives
   '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol? char=? char?))
 (define effect-primitives
@@ -189,7 +190,8 @@
     [vector-set!   . 3]
     [inspect       . 1]
     [write         . 1]
-    [display       . 1]))
+    [display       . 1]
+    [read-char     . 0]))
 (define user-primitive?
   (lambda (x) (assq x user-primitive)))
 (define user-primitive->arity
@@ -1385,6 +1387,7 @@
   (define write-label)
   (define display-label)
   (define inspect-label)
+  (define read-char-label)
 
   (define current-dump-length)
   (define symbol->index)
@@ -1425,14 +1428,15 @@
                [else `(* ,rand1 (sra ,rand2 ,shift-fixnum))])]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
+        [(read-char) `(,read-char-label)]
         [(char->integer ,[Value -> ch])
          (if (integer? ch)
-             (sra ch shift-char)
-             `(sra ,ch ,shift-char))]
+             (ash (sra ch shift-char) shift-fixnum)
+             `(ash (sra ,ch ,shift-char) ,shift-fixnum))]
         [(integer->char ,[Value -> n])
          (if (integer? n)
-             (+ tag-char (ash n shift-char))
-             `(+ ,tag-char (ash ,n ,shift-char)))]
+             (+ tag-char (ash n (- shift-char shift-fixnum)))
+             `(+ ,tag-char (ash ,n ,(- shift-char shift-fixnum))))]
         [(procedure-code ,[Value -> proc]) `(mref ,proc ,offset-procedure-code)]
         [(procedure-ref ,[Value -> proc] ,[Value -> ind])
          (if (integer? ind)
@@ -1561,6 +1565,7 @@
     (set! call/cc-label (unique-label 'call/cc))
     (set! write-label (unique-label 'write))
     (set! display-label (unique-label 'display))
+    (set! read-char-label (unique-label 'read-char))
     (set! inspect-label (unique-label 'inspect))
     (set! decode-literal-label (unique-label 'decode-literal))
 
@@ -1577,6 +1582,7 @@
                                 [,call/cc-label "_scheme_call_with_current_continuation"]
                                 [,write-label "_scheme_write"]
                                 [,display-label "_scheme_display"]
+                                [,read-char-label "_scheme_read_char"]
                                 [,inspect-label "_scheme_inspect"])
                (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                                   (reverse symbol->index))]
