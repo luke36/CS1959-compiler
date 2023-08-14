@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); interaction between call/cc and gc; is optimize-global (mostly) subsumed by a strong enough partial evaluator?
+;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -24,7 +24,7 @@
 (define *optimize-jumps-enabled* #t)
 (define *optimize-global-enabled* #t)
 (define *max-inline-literal-size* 0)
-(define *collection-enabled* #f)
+(define *collection-enabled* #t)
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
 (define disp-root-globals 0)
@@ -1897,7 +1897,9 @@
                 `((set! ,tmp ,allocation-pointer-register)
                   ,@inc
                   (if (> ,tmp ,end-of-allocation-register)
-                      (,collect-label)
+                      (begin
+                        (set! ,tmp (- ,tmp ,end-of-allocation-register))
+                        (,collect-label ,tmp))
                       (nop))
                   ,expr)))))))
   (define Body
@@ -4041,8 +4043,8 @@
               (lambda (n)
                 (if (= 0 n)
                     'success
-                    (let ([trash (make-vector 10000)])
-                      (vector-set! trash 0 trash)
-                      (malloc (- n 1)))))])
-     (malloc 25)))
+                    (let ([trash (make-vector 80000)])
+                      (vector-set! trash 0
+                        (malloc (- n 1))))))])
+     (malloc 5)))
 

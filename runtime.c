@@ -478,7 +478,7 @@ static ptr *collect_one(ptr *p) {
     return p + 1;
   } else {
     fprintf(stderr, "unrecognized object %ld during collection\n", x);
-    exit(4);
+    exit(5);
   }
 }
 
@@ -500,9 +500,60 @@ static void collect_stack(void *ra, ptr *top) {
 #define ROOTLENGTH(x) (*(long *)((long)(&(x)) + disp_root_length))
 #define ROOTROOTS(x) ((ptr *)((long)(&(x)) + disp_root_roots))
 
-ptr *collect(void *ra, ptr *top, ptr **end_of_allocation) {
-  new_heap = (ptr *)guarded_area(heapsize);
-  new_heap_end = (ptr *)((char *)new_heap + heapsize);
+static void free_area(char *addr, long n) {
+  munmap(addr - pagesize, n + 2 * pagesize);
+}
+
+static char *unguarded_area(long n) {
+  char *addr;
+
+ /* allocate, leaving room for guard pages */
+  addr = (char *)mmap(NULL,
+                      (size_t)(n + 2 * pagesize),
+                      PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANON,
+                      -1, 0);
+  if (addr == (char *)-1) {
+    fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+    exit(2);
+  }
+
+  return addr + pagesize;
+}
+
+static void fit_heap(char *addr, long new, long n) {
+  addr = mremap(addr - pagesize,
+                (size_t)(new + 2 * pagesize),
+                (size_t)(n + 2 * pagesize),
+                0);
+  if (addr == (char *)-1) {
+    fprintf(stderr, "mremap failed: %s\n", strerror(errno));
+    exit(2);
+  }
+}
+
+static void guard_area(char *addr, long n) {
+ /* remove access rights from the guard pages */
+  if (mprotect(addr - pagesize, (size_t)pagesize, PROT_NONE) ||
+    mprotect(addr + n, (size_t)pagesize, PROT_NONE)) {
+    fprintf(stderr, "mprotect failed: %s\n", strerror(errno));
+    exit(3);
+  }
+}
+
+long next_heapsize(long n, long extra) {
+  long m;
+
+  m = n + extra;
+  m = m + m / 3;
+  m = ((m + pagesize - 1) / pagesize) * pagesize;
+  return m;
+}
+
+ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
+  long new_heapsize = next_heapsize(heapsize, extra);
+  new_heap = (ptr *)unguarded_area(new_heapsize);
+  new_heap_end = (ptr *)((char *)new_heap + new_heapsize);
   alloc_ptr = new_heap;
   ptr *scan_ptr = new_heap;
 
@@ -514,7 +565,17 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation) {
   while (scan_ptr < alloc_ptr)
     scan_ptr = collect_one(scan_ptr);
 
-  munmap(heap - pagesize, heap_end - heap + 2 * pagesize);
+  free_area(heap, heapsize);
+
+  if ((char *)new_heap + heapsize - (char *)alloc_ptr >= extra) {
+    fit_heap((char *)new_heap,
+             new_heapsize,
+             heapsize);
+    new_heap_end = (ptr *)((char *)new_heap + heapsize);
+  } else
+    heapsize = new_heapsize;
+  guard_area((char *)new_heap, heapsize);
+
   heap = (char *)new_heap;
   heap_end = (char *)new_heap_end;
   *end_of_allocation = new_heap_end;

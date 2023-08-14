@@ -94,6 +94,22 @@ _scheme_symbol_to_address:
 
     .globl _scheme_call_with_current_continuation
 _scheme_call_with_current_continuation:
+CALLCC_CHECK_OVERFLOW:
+    movq %rdx, %rcx
+    addq %rbx, %rcx
+    subq %r14, %rcx
+    addq $24, %rcx
+    cmpq %r13, %rcx
+    jle CALLCC_MAKE_CONT
+CALLCC_COLLECT:
+    subq %r13, %rcx
+    movq %r15, %rdi
+    movq %rbp, %rsi
+    leaq 0(%rbp), %rdx
+    movq %r8, %r12
+    call collect
+    movq %rax, %rdx
+    movq 0(%rbp), %r13
 CALLCC_MAKE_CONT:
     movq %rdx, %r9
     addq $2, %r9
@@ -115,7 +131,7 @@ CALLCC_DO_COPY:
     jmp CALLCC_LOOP_ENTRY
 CALLCC_APPLY:
     addq %rcx, %rdx
-    jmp *-2(%r8)
+    jmp *-2(%r12)
 
     .quad -1
 _scheme_invoke_continuation:
@@ -136,6 +152,7 @@ IC_RETURN:
 
     .globl _scheme_collect
 _scheme_collect:
+    movq %r8, %rcx
     movq %r15, %rdi
     movq %rbp, %rsi
     leaq 0(%rbp), %rdx
