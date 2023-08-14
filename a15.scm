@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect
+;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters; separate label-alias and literal encoding from huge specify-representation; read-char
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -31,8 +31,13 @@
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
 (define return-address-location 'fv0)
+
 (define mask-symbol #b111)
 (define tag-symbol  #b100)
+
+(define mask-char   #b11111111)
+(define tag-char    #b11111110)
+(define shift-char  8)
 
 (define flag-true $true)
 (define flag-false $false)
@@ -137,11 +142,11 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref))
+  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer))
 (define predicate-primitives
-  '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol?))
+  '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol? char=? char?))
 (define effect-primitives
-  '(set-car! set-cdr! vector-set! procedure-set! inspect write global-set!))
+  '(set-car! set-cdr! vector-set! procedure-set! inspect write display global-set!))
 (define value-primitive?
   (lambda (x) (memq x value-primitives)))
 (define predicate-primitive?
@@ -162,11 +167,14 @@
     [vector-length . 1]
     [vector-ref    . 2]
     [void          . 0]
+    [char->integer . 1]
+    [integer->char . 1]
     [<=            . 2]
     [<             . 2]
     [=             . 2]
     [>=            . 2]
     [>             . 2]
+    [char=?        . 2]
     [boolean?      . 1]
     [eq?           . 2]
     [fixnum?       . 1]
@@ -175,11 +183,13 @@
     [procedure?    . 1]
     [vector?       . 1]
     [symbol?       . 1]
+    [char?         . 1]
     [set-car!      . 2]
     [set-cdr!      . 2]
     [vector-set!   . 3]
     [inspect       . 1]
-    [write         . 1]))
+    [write         . 1]
+    [display       . 1]))
 (define user-primitive?
   (lambda (x) (assq x user-primitive)))
 (define user-primitive->arity
@@ -207,6 +217,7 @@
             [(boolean? d) (void)]
             [(null? d) (void)]
             [(symbol? d) (void)]
+            [(char? d) (void)]
             [else (format-error who "invalid datum ~s" d)])))
   (define convert-and
     (lambda (rand*)
@@ -288,6 +299,7 @@
           [#t '(quote #t)]
           [#f '(quote #f)]
           [,n (guard (integer? x) (exact? x) (fixnum-range? x)) `(quote ,n)]
+          [,ch (guard (char? ch) (<= 0 (char->integer ch)) (>= 127 (char->integer ch))) `(quote ,ch)] ; ascii only
           [,var (guard (symbol? var)) ((Var env) var)]
           [(,proc ,[(Expr env) -> arg*] ...) (guard (assq proc env))
            `(,((Expr env) proc) ,arg* ...)]
@@ -517,11 +529,14 @@
         [cdr           cdr]
         [cons          cons]
         [vector-length vector-length]
+        [char->integer char->integer]
+        [integer->char integer->char]
         [<=            <=]
         [<             <]
         [=             =]
         [>=            >=]
         [>             >]
+        [char=?        char=?]
         [boolean?      boolean?]
         [eq?           eq?]
         [fixnum?       fixnum?]
@@ -530,11 +545,13 @@
         [procedure?    procedure?]
         [vector?       vector?]
         [symbol?       symbol?]
+        [char?         char?]
         [,x            #f])))
   (define complex?
     (lambda (im)
       (not (or (null? im)
                (symbol? im)
+               (char? im)
                (integer? im)
                (boolean? im)))))
   (define merge-value
@@ -1366,6 +1383,7 @@
 (define-who specify-representation
   (define call/cc-label)
   (define write-label)
+  (define display-label)
   (define inspect-label)
 
   (define current-dump-length)
@@ -1407,6 +1425,14 @@
                [else `(* ,rand1 (sra ,rand2 ,shift-fixnum))])]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
+        [(char->integer ,[Value -> ch])
+         (if (integer? ch)
+             (sra ch shift-char)
+             `(sra ,ch ,shift-char))]
+        [(integer->char ,[Value -> n])
+         (if (integer? n)
+             (+ tag-char (ash n shift-char))
+             `(+ ,tag-char (ash ,n ,shift-char)))]
         [(procedure-code ,[Value -> proc]) `(mref ,proc ,offset-procedure-code)]
         [(procedure-ref ,[Value -> proc] ,[Value -> ind])
          (if (integer? ind)
@@ -1468,6 +1494,7 @@
         [(,rel ,[Value -> rand1] ,[Value -> rand2]) (guard (relop? rel))
          `(,rel ,rand1 ,rand2)]
         [(eq? ,[Value -> rand1] ,[Value -> rand2]) `(= ,rand1 ,rand2)]
+        [(char=? ,[Value -> rand1] ,[Value -> rand2]) `(= ,rand1 ,rand2)]
         [(null? ,[Value -> e]) `(= ,e ,$nil)]
         [(boolean? ,[Value -> e]) `(= (logand ,e ,mask-boolean) ,tag-boolean)]
         [(fixnum? ,[Value -> e]) `(= (logand ,e ,mask-fixnum) ,tag-fixnum)]
@@ -1475,6 +1502,7 @@
         [(procedure? ,[Value -> e]) `(= (logand ,e ,mask-procedure) ,tag-procedure)]
         [(vector? ,[Value -> e]) `(= (logand ,e ,mask-vector) ,tag-vector)]
         [(symbol? ,[Value -> e]) `(= (logand ,e ,mask-symbol) ,tag-symbol)]
+        [(char? ,[Value -> e]) `(= (logand ,e ,mask-char) ,tag-char)]
         [,x x])))
   (define Effect
     (lambda (eff)
@@ -1486,6 +1514,7 @@
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Effect -> effect])
          `(let ([,uvar* ,value*] ...) ,effect)]
         [(write ,[Value -> expr]) `(,write-label ,expr)]
+        [(display ,[Value -> expr]) `(,display-label ,expr)]
         [(inspect ,[Value -> expr]) `(,inspect-label ,expr)]
         [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(global-set! ,lab ,[Value -> e]) `(mset! ,lab 0 ,e)]
@@ -1515,6 +1544,7 @@
                              (+ current-dump-length (add1 (string-length (symbol->string i)))))
                            (+ tag-symbol (ash index shift-fixnum)))])]
             [(integer? i) (ash i shift-fixnum)]
+            [(char? i) (+ (ash (char->integer i) shift-char) tag-char)]
             [else
               (let ([complex (unique-label 'code)]
                     [lab (unique-label 'literal)])
@@ -1530,6 +1560,7 @@
 
     (set! call/cc-label (unique-label 'call/cc))
     (set! write-label (unique-label 'write))
+    (set! display-label (unique-label 'display))
     (set! inspect-label (unique-label 'inspect))
     (set! decode-literal-label (unique-label 'decode-literal))
 
@@ -1545,6 +1576,7 @@
             `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
                                 [,call/cc-label "_scheme_call_with_current_continuation"]
                                 [,write-label "_scheme_write"]
+                                [,display-label "_scheme_display"]
                                 [,inspect-label "_scheme_inspect"])
                (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                                   (reverse symbol->index))]
@@ -4008,22 +4040,21 @@
                     (lambda (y) x))))))
 
 (define yin-yang
-  '(let ([count 50]
-         [res '()])
+  '(let ([count 50])
      (let ([yin
              ((lambda (cc)
-                (set! res (cons '! res))
+                (display #\@)
                 (set! count (- count 1))
                 (if (= count 0)
-                    (lambda (x) res)
+                    (lambda (x) (display #\newline))
                     cc))
               (call/cc (lambda (c) c)))])
        (let ([yang
                ((lambda (cc)
-                  (set! res (cons '- res))
+                  (display #\*)
                   (set! count (- count 1))
                   (if (= count 0)
-                      (lambda (x) res)
+                      (lambda (x) (display #\newline))
                       cc))
                 (call/cc (lambda (c) c)))])
          (yin yang)))))

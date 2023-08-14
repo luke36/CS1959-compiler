@@ -217,6 +217,9 @@ static void usage_error(char *who) {
 #define tag_boolean 6
 #define mask_symbol 7
 #define tag_symbol 4
+#define shift_char 8
+#define mask_char 255
+#define tag_char 254
 #define _false 6
 #define _true 14
 #define _nil 22
@@ -237,6 +240,7 @@ typedef long ptr;
 #define CDR(x) (*(ptr *)(UNTAG(x,tag_pair) + disp_cdr))
 #define VECTORLENGTH(x) (*(ptr *)(UNTAG(x,tag_vector) + disp_vector_length))
 #define VECTORDATA(x) ((ptr *)(UNTAG(x,tag_vector) + disp_vector_data))
+#define CHAR(x) (x >> shift_char)
 
 #define PROCEDURECODE(x) (*(ptr *)(UNTAG(x,tag_procedure) + disp_procedure_code))
 #define PROCEDUREDATA(x) ((ptr *)(UNTAG(x,tag_procedure) + disp_procedure_data))
@@ -315,6 +319,12 @@ static void print1(ptr x, int d) {
     printf("#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
     printf("%s", SCHEME_SYMBOL_TO_ADDRESS(x));
+  } else if (TAG(x, mask_char) == tag_char) {
+    char c = CHAR(x);
+    if (c <= 32)
+      printf("#\\x%x", c);
+    else
+      printf("#\\%c", c);
   }
 }
 
@@ -381,8 +391,24 @@ ptr inspect(ptr x) {
   return _void;
 }
 
-ptr scheme_write(ptr x) {
+ptr write_ptr(ptr x) {
   print(x);
+  return _void;
+}
+
+ptr display_ptr(ptr x) {
+  if (TAG(x, mask_char) == tag_char) {
+    char c = CHAR(x);
+    if (c == '\n')
+      printf("\n");
+    else if (c == '\t')
+      printf("\t");
+    else if (c == ' ')
+      printf(" ");
+    else if (c > 32)
+      printf("%c", c);
+  } else
+    print(x);
   return _void;
 }
 
