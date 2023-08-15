@@ -502,6 +502,8 @@ static ptr *collect_one(ptr *p) {
     return p + 1;
   } else if (TAG(x, mask_symbol) == tag_symbol) {
     return p + 1;
+  } else if (TAG(x, mask_char) == tag_char) {
+    return p + 1;
   } else {
     fprintf(stderr, "unrecognized object %ld during collection\n", x);
     exit(5);

@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters (not now); separate label-alias and literal encoding from huge specify-representation
+;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -143,7 +143,9 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char))
+  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char call-with-current-continuation))
+(define side-effect-primitives
+  '(read-char call-with-current-continuation))
 (define predicate-primitives
   '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol? char=? char?))
 (define effect-primitives
@@ -156,6 +158,8 @@
   (lambda (x) (memq x effect-primitives)))
 (define primitive?
   (lambda (x) (or (value-primitive? x) (predicate-primitive? x) (effect-primitive? x))))
+(define side-effect-primitive?
+  (lambda (x) (memq x side-effect-primitives)))
 
 (define user-primitive
   '([+             . 2]
@@ -188,6 +192,7 @@
     [set-car!      . 2]
     [set-cdr!      . 2]
     [vector-set!   . 3]
+    [call-with-current-continuation . 1]
     [inspect       . 1]
     [write         . 1]
     [display       . 1]
@@ -305,6 +310,7 @@
           [,var (guard (symbol? var)) ((Var env) var)]
           [(,proc ,[(Expr env) -> arg*] ...) (guard (assq proc env))
            `(,((Expr env) proc) ,arg* ...)]
+          [(call/cc ,rand* ...) ((Expr env) `(call-with-current-continuation ,rand* ...))]
           [(,prim ,[(Expr env) -> rand*] ...) (guard (user-primitive? prim))
            (if (= (user-primitive->arity prim) (length rand*))
                `(,prim ,rand* ...)
@@ -313,7 +319,6 @@
            (check-datum datum)
            `(quote ,datum)]
           [(quasiquote ,quasidatum) (convert-quasiquote quasidatum env)]
-          [(call/cc ,[(Expr env) -> expr]) `(call/cc ,expr)]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq])
            `(if ,cond ,conseq (void))]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq] ,[(Expr env) -> alter])
@@ -370,7 +375,7 @@
   (define Expr
     (lambda (e)
       (match e
-        [,prim (guard (or (user-primitive? prim) (eq? prim 'call/cc)))
+        [,prim (guard (user-primitive? prim))
          (when (not (assq prim bindings))
            (let ([new-p (unique-name prim)]
                  [new-fml* (let gen ([c (user-primitive->arity prim)])
@@ -387,7 +392,6 @@
         [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
         [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
         [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-        [(call/cc ,[expr]) `(call/cc ,expr)]
         [(quote ,imm) `(quote ,imm)]
         [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
         [,x (guard (uvar? x)) x])))
@@ -406,7 +410,6 @@
       [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [((lambda (,uvar* ...) ,[body]) ,[arg*] ...)
        (make-let `([,uvar* ,arg*] ...) body)]
@@ -441,8 +444,6 @@
            (difference a uvar*))]
         [(,prim ,[Expr -> rand* a*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union a*))]
-        [(call/cc ,[Expr -> expr a])
-         (values `(call/cc ,expr) a)]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc a] ,[Expr -> arg* a*] ...)
          (values `(,proc ,arg* ...) (apply union a a*))]
@@ -467,9 +468,12 @@
           [(letrec ([,uvar* ,expr*] ...) ,body) ((simple? x* reduc-now?) body)]
           [(set! ,uvar ,expr) ((simple? x* reduc-now?) expr)]
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f) expr)]
+          [(call/cc ,expr)
+           (if (eq? *standard* 'r6rs)
+               ((simple? x* reduc-now?) expr)
+               #f)]
           [(,prim ,rand* ...) (guard (primitive? prim))
            (for-all (simple? x* reduc-now?) rand*)]
-          [(call/cc ,expr) #f]
           [(quote ,imm) #t]
           [(,proc ,arg* ...)
            (if (eq? *standard* 'r6rs)
@@ -515,7 +519,6 @@
       [(lambda (,uvar* ...) (assigned (,as* ...) ,[expr]))
        `(lambda (,uvar* ...) (assigned (,as* ...) ,expr))]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x (guard (uvar? x)) x])))
@@ -601,7 +604,6 @@
                             [(complex? v) (values `(,prim ,rand* ...) (list v))]
                             [else (values `(quote ,v) (list v))])))]
                  [else (values `(,prim ,rand* ...) '())])]
-          [(call/cc ,[(Expr env) -> expr _]) (values `(call/cc ,expr) '())]
           [(quote ,imm) (values `(quote ,imm) (list imm))]
           [(,[(Expr env) -> proc _] ,[(Expr env) -> arg* _*] ...)
            (values `(,proc ,arg* ...) '())]
@@ -679,8 +681,6 @@
              (apply union u*))]
           [(,prim ,[(Expr 'value) -> rand* u*] ...) (guard (primitive? prim))
            (values `(,prim ,rand* ...) (apply union u*))]
-          [(call/cc ,[(Expr 'value) -> expr u])
-           (values `(call/cc ,expr) u)]
           [(quote ,imm)
            (if (eq? ctx 'value)
                (values `(quote ,imm) '())
@@ -713,9 +713,9 @@
          (andmap non-capture? (cons expr expr*))]
         [(set! ,uvar ,expr) (non-capture? expr)]
         [(lambda (,uvar* ...) ,expr) #t]
+        [(call/cc ,expr) #f]
         [(,prim ,rand* ...) (guard (primitive? prim))
          (for-all non-capture? rand*)]
-        [(call/cc ,expr) #f]
         [(quote ,imm) #t]
         [(,proc ,arg* ...) #f]
         [,x (guard (uvar? x)) #t])))
@@ -746,8 +746,10 @@
                  `([,uvar* . ,e*] ...))))]
         [(set! ,uvar ,[o]) o]
         [(lambda (,uvar* ...) ,body) '()]
-        [(,prim ,o* ...) (guard (primitive? prim)) '()]
-        [(call/cc ,[o]) o]
+        [(,prim ,e* ...) (guard (primitive? prim))
+         (if (eq? (length e*) 1)
+             (Expr (car e*))
+             '())]
         [(quote ,imm) '()]
         [(,o ,o* ...) '()]
         [,x (guard (uvar? x)) '()])))
@@ -792,7 +794,6 @@
                 ,(make-let `([,as* (cons ,new-t* (void))] ...)
                    ((Expr (append as* assigned) outmost) expr))))]
           [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
           [,x (guard (uvar? x))
@@ -847,7 +848,6 @@
         [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
         [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
         [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-        [(call/cc ,[expr]) `(call/cc ,expr)]
         [(quote ,imm)
          (if (and (or (pair? imm) (vector? imm))
                   (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
@@ -895,7 +895,6 @@
            `(letrec ([,anon (lambda (,uvar* ...) ,body)])
               ,anon))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-        [(call/cc ,[Expr -> expr]) `(call/cc ,expr)]
         [(quote ,imm) `(quote ,imm)]
         [(,[Expr -> proc] ,[Expr -> arg*] ...) `(,proc ,arg* ...)]
         [,x x])))
@@ -922,7 +921,6 @@
        `(letrec ([,uvar* (lambda (,formal** ...) ,body*)] ...) ,body)]
       [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
       [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-      [(call/cc ,[expr]) `(call/cc ,expr)]
       [(quote ,imm) `(quote ,imm)]
       [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
       [,x x])))
@@ -944,8 +942,6 @@
              (difference (apply union f f*^) uvar*)))]
         [(,prim ,[Expr -> rand* f*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union f*))]
-        [(call/cc ,[Expr -> expr f])
-         (values `(call/cc ,expr) f)]
         [(quote ,imm) (values e '())]
         [(,[Expr -> proc f] ,[Expr -> arg* f*] ...)
          (values `(,proc ,arg* ...) (apply union f f*))]
@@ -986,7 +982,6 @@
                 (closures ([,uvar* ,lab* ,fv**^ ...] ...) ,body)))]
           [(,prim ,[(Expr outmost) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
-          [(call/cc ,[(Expr outmost) -> expr]) `(call/cc ,expr)]
           [(quote ,imm) e]
           [(,[(Expr outmost) -> proc] ,[(Expr outmost) -> arg*] ...)
            (if (uvar? proc)
@@ -1004,7 +999,7 @@
       [(with-global-data (,lab* ...)
          (outmost ,out ,[(Expr out) -> e]))
        `(with-global-data (,@(map cdr global-label*) ,lab* ...)
-          (outmost ,out ,e))])))
+          ,e)])))
 
 (define-who optimize-known-call
   (define Expr
@@ -1027,8 +1022,6 @@
                 (closures ([,uvar* ,data** ...] ...) ,((Expr known^) body))))]
           [(,prim ,[(Expr known) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
-          [(call/cc ,[(Expr known) -> expr])
-           `(call/cc ,expr)]
           [(quote ,imm) e]
           [(,proc ,[(Expr known) -> arg*] ...)
            (if (memq proc known)
@@ -1039,10 +1032,8 @@
   (lambda (p)
     (if *closure-optimization-enabled*
         (match p
-          [(with-global-data ,data
-             (outmost ,out ,[(Expr '()) -> e]))
-           `(with-global-data ,data
-              (outmost ,out ,e))])
+          [(with-global-data ,data ,[(Expr '()) -> e])
+           `(with-global-data ,data ,e)])
         p)))
 
 (define-who uncover-well-known
@@ -1067,7 +1058,6 @@
              (values (difference u^ f*))))]
         [(,prim ,[rand* u*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply union u*))]
-        [(call/cc ,[expr u]) (values `(call/cc ,expr) u)]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[proc u] ,cp ,[arg* u*] ...)
          (values `(,proc ,cp ,arg* ...) (apply union u u*))]
@@ -1076,8 +1066,8 @@
   (lambda (p)
     (if *closure-optimization-enabled*
         (match p
-          [(with-global-data ,data (outmost ,out ,[Expr -> e u]))
-           `(with-global-data ,data (outmost ,out ,e))])
+          [(with-global-data ,data ,[Expr -> e u])
+           `(with-global-data ,data ,e)])
         p)))
 
 (define-who optimize-free
@@ -1121,7 +1111,6 @@
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
           [(,prim ,[rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
-          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,cp ,[arg*] ...)
            (if (memq proc wk-lab)
@@ -1148,10 +1137,8 @@
   (lambda (p)
     (if *closure-optimization-enabled*
         (match p
-          [(with-global-data ,data
-             (outmost ,out ,[(Expr '() '()) -> e]))
-           `(with-global-data ,data
-              (outmost ,out ,e))])
+          [(with-global-data ,data ,[(Expr '() '()) -> e])
+           `(with-global-data ,data ,e)])
         p)))
 
 (define-who optimize-self-reference
@@ -1177,7 +1164,6 @@
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
           [(,prim ,[rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
-          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
           [,x (guard (uvar? x))
@@ -1201,10 +1187,8 @@
   (lambda (p)
     (if *closure-optimization-enabled*
         (match p
-          [(with-global-data ,data
-             (outmost ,out ,[(Expr #f #f) -> e]))
-           `(with-global-data ,data
-              (outmost ,out ,e))])
+          [(with-global-data ,data ,[(Expr #f #f) -> e])
+           `(with-global-data ,data ,e)])
         p)))
 
 (define-who introduce-procedure-primitives
@@ -1250,9 +1234,7 @@
                  (make-begin `(,fill* ... ,body))))]
           [(,prim ,[(Expr cp fvs) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
-          [(call/cc ,[(Expr cp fvs) -> expr]) `(call/cc ,expr)]
           [(quote ,imm) e]
-          [(outmost ,out ,[(Expr cp fvs) -> e]) `(outmost ,out ,e)]
           [(,[(Expr cp fvs) -> proc] ,[(Expr cp fvs) -> arg*] ...)
            (if (label? proc)            ; in the presence of optimize-known-call
                `(,proc ,arg* ...)
@@ -1265,11 +1247,9 @@
   (lambda (x)
     (set! closure-length '())
     (match x
-      [(with-global-data ,data
-         (outmost ,out ,[(Expr #f '()) -> e]))
+      [(with-global-data ,data ,[(Expr #f '()) -> e])
        `(with-closure-length ,(if *collection-enabled* closure-length '())
-          (with-global-data ,data
-            (outmost ,out ,e)))])))
+          (with-global-data ,data ,e))])))
 
 (define-who lift-letrec
   (define Expr
@@ -1285,7 +1265,6 @@
          (values body (apply append b (map cons `([,lab* (lambda ,uvars* ,body*)] ...) b*)))]
         [(,prim ,[Expr -> rand* b*] ...) (guard (primitive? prim))
          (values `(,prim ,rand* ...) (apply append b*))]
-        [(call/cc ,[Expr -> expr b]) (values `(call/cc ,expr) b)]
         [(quote ,imm) (values `(quote ,imm) '())]
         [(,[Expr -> proc b] ,[Expr -> arg* b*] ...)
          (values `(,proc ,arg* ...) (apply append b b*))]
@@ -1293,12 +1272,10 @@
   (lambda (p)
     (match p
       [(with-closure-length ,closure-length
-         (with-global-data ,data
-           (outmost ,out ,[Expr -> body binds])))
+         (with-global-data ,data ,[Expr -> body binds]))
        `(with-closure-length ,closure-length
           (with-global-data ,data
-            (outmost ,out
-              (letrec ,binds ,body))))])))
+            (letrec ,binds ,body)))])))
 
 (define-who normalize-context
   (define Value
@@ -1317,7 +1294,6 @@
          `(if (,prim ,rand* ...) '#t '#f)]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(begin (,prim ,rand* ...) (void))]
-        [(call/cc ,[Value -> expr]) `(call/cc ,expr)]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(,proc ,arg* ...)]
         [,lab (guard (label? lab)) lab]
@@ -1339,8 +1315,6 @@
          `(,prim ,rand* ...)]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(begin (,prim ,rand* ...) (true))]
-        [(call/cc ,[Value -> expr])
-         `(if (eq? (call/cc ,expr) '#f) (false) (true))]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(if (eq? (,proc ,arg* ...) '#f) (false) (true))]
         [,lab (guard (label? lab)) '(true)]
@@ -1357,13 +1331,14 @@
          (make-begin `(,effect* ... ,effect))]
         [(let ([,uvar* ,[Value -> body*]] ...) ,[Effect -> body])
          `(let ([,uvar* ,body*] ...) ,body)]
+        [(,prim ,[Value -> rand*] ...) (guard (side-effect-primitive? prim))
+         `(,prim ,rand* ...)]
         [(,prim ,[Effect -> rand*] ...) (guard (value-primitive? prim))
-         (make-nopless-begin `(,rand* ...))] ; call/cc??
+         (make-nopless-begin `(,rand* ...))]
         [(,prim ,[Effect -> rand*] ...) (guard (predicate-primitive? prim))
          (make-nopless-begin `(,rand* ...))]
         [(,prim ,[Value -> rand*] ...) (guard (effect-primitive? prim))
          `(,prim ,rand* ...)]
-        [(call/cc ,[Value -> expr]) `(call/cc ,expr)]
         [(,[Value -> proc] ,[Value -> arg*] ...)
          `(,proc ,arg* ...)]
         [,lab (guard (label? lab)) '(nop)]
@@ -1373,27 +1348,63 @@
     (match p
       [(with-closure-length ,closure-length
          (with-global-data ,data
-           (outmost ,out
-             (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...)
-               ,[Value -> body]))))
+           (letrec ([,lab* (lambda (,uvar* ...) ,[Value -> body*])] ...)
+             ,[Value -> body])))
        `(with-closure-length ,closure-length
           (with-global-data ,data
-            (outmost ,out
-              (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...)
+            (letrec ([,lab* (lambda (,uvar* ...) ,body*)] ...)
+              ,body)))])))
+
+(define-who expose-library-procedures
+  (define lib-prim*
+    '(call-with-current-continuation inspect write display read-char))
+  (define lib-proc*
+    (map (lambda (p)
+           (if (eq? p 'call-with-current-continuation)
+               "_scheme_call_with_current_continuation"
+               (string-append "_scheme_" (symbol->string p)))) lib-prim*))
+  (define lib-prim?
+    (lambda (x) (memq x lib-prim*)))
+  (define lib-lab*)
+  (define lib-prim-lab*)
+  (define Expr
+    (lambda (e)
+      (match e
+        [(if ,[Expr -> cond] ,[Expr -> conseq] ,[Expr -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Expr -> effect*] ... ,[Expr -> expr])
+         `(begin ,effect* ... ,expr)]
+        [(let ([,uvar* ,[Expr -> value*]] ...) ,[Expr -> expr])
+         `(let ([,uvar* ,value*] ...) ,expr)]
+        [(,prim ,[Expr -> rand*] ...) (guard (lib-prim? prim))
+         `(,(cdr (assq prim lib-prim-lab*)) ,rand* ...)]
+        [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim))
+         `(,prim ,rand* ...)]
+        [(true) e]
+        [(false) e]
+        [(nop) e]
+        [(quote ,datum) e]
+        [(,[Expr -> proc] ,[Expr -> arg*] ...) `(,proc ,arg* ...)]
+        [,x x])))
+  (lambda (p)
+    (set! lib-lab* (map unique-label lib-prim*))
+    (set! lib-prim-lab* (map cons lib-prim* lib-lab*))
+    (match p
+      [(with-closure-length ,closure-length
+         (with-global-data (,glab* ...)
+           (letrec ([,label* (lambda (,uvar* ...) ,[Expr -> body*])] ...)
+             ,[Expr -> body])))
+       `(with-label-alias ([,lib-lab* ,lib-proc*] ...)
+          (with-closure-length ,closure-length
+            (with-global-data (,glab* ...)
+              (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
                 ,body))))])))
 
 (define-who specify-representation
-  (define call/cc-label)
-  (define write-label)
-  (define display-label)
-  (define inspect-label)
-  (define read-char-label)
-
+  (define decode-literal-label)
   (define current-dump-length)
   (define symbol->index)
-
   (define complex-datum-label*)
-
   (define specify-complex
     (lambda (?complex)
       (cond [(pair? ?complex)
@@ -1419,7 +1430,6 @@
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Value -> value])
          `(let ([,uvar* ,value*] ...) ,value)]
         [(quote ,[Immediate -> imm]) imm]
-        [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(+ ,[Value -> rand1] ,[Value -> rand2]) `(+ ,rand1 ,rand2)]
         [(- ,[Value -> rand1] ,[Value -> rand2]) `(- ,rand1 ,rand2)]
         [(* ,[Value -> rand1] ,[Value -> rand2])
@@ -1428,7 +1438,6 @@
                [else `(* ,rand1 (sra ,rand2 ,shift-fixnum))])]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
-        [(read-char) `(,read-char-label)]
         [(char->integer ,[Value -> ch])
          (if (integer? ch)
              (ash (sra ch shift-char) shift-fixnum)
@@ -1517,10 +1526,6 @@
          `(begin ,effect* ... ,effect)]
         [(let ([,uvar* ,[Value -> value*]] ...) ,[Effect -> effect])
          `(let ([,uvar* ,value*] ...) ,effect)]
-        [(write ,[Value -> expr]) `(,write-label ,expr)]
-        [(display ,[Value -> expr]) `(,display-label ,expr)]
-        [(inspect ,[Value -> expr]) `(,inspect-label ,expr)]
-        [(call/cc ,[Value -> expr]) `(,call/cc-label ,expr)]
         [(global-set! ,lab ,[Value -> e]) `(mset! ,lab 0 ,e)]
         [(set-car! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-car ,e)]
         [(set-cdr! ,[Value -> pair] ,[Value -> e]) `(mset! ,pair ,offset-cdr ,e)]
@@ -1558,32 +1563,21 @@
                     complex-datum-label*))
                 `(mref ,lab ,0))])))
   (lambda (p)
+    (set! decode-literal-label (unique-label 'decode-literal-label))
     (set! current-dump-length 0)
     (set! symbol->index '())
     (set! complex-datum-label* '())
-
-    (set! call/cc-label (unique-label 'call/cc))
-    (set! write-label (unique-label 'write))
-    (set! display-label (unique-label 'display))
-    (set! read-char-label (unique-label 'read-char))
-    (set! inspect-label (unique-label 'inspect))
-    (set! decode-literal-label (unique-label 'decode-literal))
-
     (match p
-      [(with-closure-length ,closure-length
-         (with-global-data (,glab* ...)
-           (outmost ,out
+      [(with-label-alias (,alias* ...)
+         (with-closure-length ,closure-length
+           (with-global-data (,glab* ...)
              (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
                ,[Value -> body]))))
        (match complex-datum-label*
          [([,complex* ,code* ,lab*] ...)
           (let ([l* (map (lambda (v) decode-literal-label) lab*)])
             `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
-                                [,call/cc-label "_scheme_call_with_current_continuation"]
-                                [,write-label "_scheme_write"]
-                                [,display-label "_scheme_display"]
-                                [,read-char-label "_scheme_read_char"]
-                                [,inspect-label "_scheme_inspect"])
+                                ,alias* ...)
                (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
                                                   (reverse symbol->index))]
                                   [,complex* (encode-literal (quote ,code*))] ...
@@ -1936,7 +1930,7 @@
                   ,@inc
                   (if (> ,tmp ,end-of-allocation-register)
                       (begin
-                        (set! ,tmp (- ,tmp ,end-of-allocation-register))
+                        (set! ,tmp (- ,tmp ,allocation-pointer-register))
                         (,collect-label ,tmp))
                       (nop))
                   ,expr)))))))
@@ -3606,7 +3600,7 @@
   (define Expr
     (lambda (x)
       (match x
-        [(with-global-data ,data (outmost ,out ,[e])) e]
+        [(with-global-data ,data ,[e]) e]
         [,label (guard (label? label)) '()]
         [,uvar (guard (uvar? uvar)) '()]
         [(quote ,imm) '()]
@@ -3947,6 +3941,7 @@
   introduce-procedure-primitives
   lift-letrec
   normalize-context
+  expose-library-procedures
   specify-representation
   uncover-locals
   remove-let
