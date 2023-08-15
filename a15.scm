@@ -468,7 +468,7 @@
           [(letrec ([,uvar* ,expr*] ...) ,body) ((simple? x* reduc-now?) body)]
           [(set! ,uvar ,expr) ((simple? x* reduc-now?) expr)]
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f) expr)]
-          [(call/cc ,expr)
+          [(call-with-current-continuation ,expr)
            (if (eq? *standard* 'r6rs)
                ((simple? x* reduc-now?) expr)
                #f)]
@@ -713,7 +713,7 @@
          (andmap non-capture? (cons expr expr*))]
         [(set! ,uvar ,expr) (non-capture? expr)]
         [(lambda (,uvar* ...) ,expr) #t]
-        [(call/cc ,expr) #f]
+        [(call-with-current-continuation ,expr) #f]
         [(,prim ,rand* ...) (guard (primitive? prim))
          (for-all non-capture? rand*)]
         [(quote ,imm) #t]

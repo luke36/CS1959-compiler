@@ -353,13 +353,15 @@ static void print(long x) {
 
 static ptr walk(void *ra, ptr *top) {
   int d = 0;
+  int has_fv = 0;
+
   while (d < MAXFRAME) {
     if (ra == SCHEME_EXIT || d > MAXFRAME) {
       wprintf(L";   #<system continuation>\n");
       return _void;
     } else {
       wprintf(L";   #<continuation>\n");
-      wprintf(L";     frame variables:\n");
+      has_fv = 0;
     }
     long size = FRAME_SIZE(ra);
     long nptr = UNFIX(size);
@@ -368,6 +370,10 @@ static ptr walk(void *ra, ptr *top) {
     ptr *bot = top - nptr;
     for (long i = 1; i < nptr; i++)
       if (ITH_LIVE(mask_start, i)) {
+        if (!has_fv) {
+          has_fv = 1;
+          wprintf(L";     frame variables:\n");
+        }
         wprintf(L";     %ld.\t\t", i);
         print(*(bot + i));
         wprintf(L"\n");
