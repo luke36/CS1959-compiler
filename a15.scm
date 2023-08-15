@@ -1,11 +1,5 @@
 ;; todo: is optimize-global (mostly) subsumed by a strong enough partial evaluator?; carefully reorder evalution of arguments
 
-;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
-;; possible source in this compiler). however,
-;;   1. sra always appears as the second operand of *;
-;;   2. operands of * are computed in order.
-;; so this evil non-ptr is gone immediately and have no chance to be live on the frame.
-
 (eval-when (compile load eval)
   (optimize-level 2)
   (case-sensitive #t)
@@ -117,6 +111,10 @@
 (define lambda?
     (lambda (x)
       (and (pair? x) (eq? (car x) 'lambda))))
+
+(define trivial?
+    (lambda (v)
+      (or (uvar? v) (label? v) (integer? v))))
 
 (define (make-nopless-begin x*)
   (let ([x* (remove '(nop) x*)])
@@ -1414,12 +1412,21 @@
              (vector-map specify-complex ?complex)]
             [else (Immediate ?complex)])))
 
+  (define trivialize
+    (lambda (k . e*)
+      (let* ([t* (map (lambda (e) (if (trivial? e) #f (unique-name 'tmp))) e*)]
+             [e*^ (map (lambda (e t) (or t e)) e* t*)]
+             [bd* (map (lambda (e t) (if t (list (list t e)) '())) e* t*)])
+        (make-let (apply append bd*)
+          (apply k e*^)))))
+
   (define offset-car (- disp-car tag-pair))
   (define offset-cdr (- disp-cdr tag-pair))
   (define offset-vector-length (- disp-vector-length tag-vector))
   (define offset-vector-data (- disp-vector-data tag-vector))
   (define offset-procedure-code (- disp-procedure-code tag-procedure))
   (define offset-procedure-data (- disp-procedure-data tag-procedure))
+
   (define Value
     (lambda (v)
       (match v
@@ -1435,7 +1442,14 @@
         [(* ,[Value -> rand1] ,[Value -> rand2])
          (cond [(integer? rand1) `(* ,(sra rand1 shift-fixnum) ,rand2)]
                [(integer? rand2) `(* ,rand1 ,(sra rand2 shift-fixnum))]
-               [else `(* ,rand1 (sra ,rand2 ,shift-fixnum))])]
+               [else ; sra is evil
+                 (trivialize
+                   (lambda (rand1)
+                     (trivialize
+                       (lambda (rand2)
+                         `(* ,rand1 ,rand2))
+                       `(sra ,rand2 ,shift-fixnum)))
+                   rand1)])]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
         [(char->integer ,[Value -> ch])
@@ -1458,18 +1472,14 @@
              `(mref ,vec (+ ,offset-vector-data ,ind)))]
         [(global-ref ,lab) `(mref ,lab 0)]
         [(cons ,[Value -> e1] ,[Value -> e2])
-         (let* ([tmp-car (unique-name 'tmp)]
-                [tmp-cdr (unique-name 'tmp)]
-                [tmp (unique-name 'tmp)]
-                [e1^ (if (or (integer? e1) (uvar? e1)) e1 tmp-car)]
-                [e2^ (if (or (integer? e2) (uvar? e2)) e2 tmp-cdr)]
-                [bd1 (if (or (integer? e1) (uvar? e1)) '() `([,tmp-car ,e1]))]
-                [bd2 (if (or (integer? e2) (uvar? e2)) '() `([,tmp-cdr ,e2]))])
-           (make-let `(,@bd1 ,@bd2)
-             `(let ([,tmp (+ (alloc ,size-pair) ,tag-pair)])
-                (begin (mset! ,tmp ,offset-car ,e1^)
-                       (mset! ,tmp ,offset-cdr ,e2^)
-                       ,tmp))))]
+         (trivialize
+           (lambda (e1^ e2^)
+             (let ([tmp (unique-name 'tmp)])
+               `(let ([,tmp (+ (alloc ,size-pair) ,tag-pair)])
+                  (begin (mset! ,tmp ,offset-car ,e1^)
+                         (mset! ,tmp ,offset-cdr ,e2^)
+                         ,tmp))))
+           e1 e2)]
         [(make-procedure ,[Value -> lab] ,[Value -> e])
          (if (integer? e)
              (let ([tmp (unique-name 'tmp)])
@@ -1493,7 +1503,14 @@
                     (begin (mset! ,tmp2 ,offset-vector-length ,tmp1)
                            ,tmp2)))))]
         [(void) $void]
-        [(,[Value -> proc] ,[Value -> arg*] ...) `(,proc ,arg* ...)]
+        [(,[Value -> proc] ,[Value -> arg*] ...)
+         (apply trivialize ; instruction address is evil
+           (lambda arg*
+             (trivialize
+               (lambda (proc)
+                 `(,proc ,arg* ...))
+               proc))
+           arg*)]
         [,x x])))
   (define Pred
     (lambda (p)
@@ -1537,8 +1554,15 @@
          (if (integer? ind)
              `(mset! ,vec ,(+ offset-vector-data ind) ,e)
              `(mset! ,vec (+ ,offset-vector-data ,ind) ,e))]
-        [(,[Value -> proc] ,[Value -> arg*] ...) `(,proc ,arg* ...)]
-        [(nop) '(nop)])))
+        [(nop) '(nop)]
+        [(,[Value -> proc] ,[Value -> arg*] ...)
+         (apply trivialize
+           (lambda arg*
+             (trivialize
+               (lambda (proc)
+                 `(,proc ,arg* ...))
+               proc))
+           arg*)])))
   (define Immediate
     (lambda (i)
       (cond [(eq? i #t) $true]
@@ -1762,9 +1786,6 @@
   (define introduce-local
     (lambda (x)
       (set! fresh-locals (cons x fresh-locals))))
-  (define trivial?
-    (lambda (v)
-      (or (uvar? v) (label? v) (integer? v))))
   (define trivialize
     (lambda (rand)
       (cond [(trivial? rand) (cons '() rand)]
@@ -1779,15 +1800,10 @@
         (make-begin `(,@eff* (,rator ,@triv*))))))
   (define process-procedure-call ; instruction address is evil
     (lambda (rator rand*)
-      (let* ([rand-effs-triv* (map trivialize rand*)]
-             [rand-eff* (apply append (map car rand-effs-triv*))]
-             [rand-triv* (map cdr rand-effs-triv*)]
-             [rator-eff-triv (trivialize rator)]
-             [rator-eff (car rator-eff-triv)]
-             [rator-triv (cdr rator-eff-triv)])
-        (make-begin `(,@rand-eff*
-                       ,@rator-eff
-                       (,rator-triv ,@rand-triv*))))))
+      (let* ([effs-triv* (map trivialize (cons rator rand*))]
+             [eff* (apply append (map car effs-triv*))]
+             [triv* (map cdr effs-triv*)])
+        (make-begin `(,@eff* (,(car triv*) ,@(cdr triv*)))))))
   (define Body
     (lambda (b)
       (match b
