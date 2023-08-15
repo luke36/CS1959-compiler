@@ -1,4 +1,4 @@
-;; todo: add trap-return-point (not now); is optimize-global (mostly) subsumed by a strong enough partial evaluator?; avoid saving rp when calling collect; unicode characters
+;; todo: is optimize-global (mostly) subsumed by a strong enough partial evaluator?; carefully reorder evalution of arguments
 
 ;; sra is evil: it makes ptrs non-ptrs (of course some other operands, but I believe sra is the only
 ;; possible source in this compiler). however,
@@ -1248,7 +1248,7 @@
     (set! closure-length '())
     (match x
       [(with-global-data ,data ,[(Expr #f '()) -> e])
-       `(with-closure-length ,(if *collection-enabled* closure-length '())
+       `(with-closure-length ,closure-length
           (with-global-data ,data ,e))])))
 
 (define-who lift-letrec
@@ -1777,12 +1777,17 @@
              [eff* (apply append (map car effs-triv*))]
              [triv* (map cdr effs-triv*)])
         (make-begin `(,@eff* (,rator ,@triv*))))))
-  (define process-procedure-call
+  (define process-procedure-call ; instruction address is evil
     (lambda (rator rand*)
-      (let* ([effs-triv* (map trivialize (cons rator rand*))]
-             [eff* (apply append (map car effs-triv*))]
-             [triv* (map cdr effs-triv*)])
-        (make-begin `(,@eff* (,(car triv*) ,@(cdr triv*)))))))
+      (let* ([rand-effs-triv* (map trivialize rand*)]
+             [rand-eff* (apply append (map car rand-effs-triv*))]
+             [rand-triv* (map cdr rand-effs-triv*)]
+             [rator-eff-triv (trivialize rator)]
+             [rator-eff (car rator-eff-triv)]
+             [rator-triv (cdr rator-eff-triv)])
+        (make-begin `(,@rand-eff*
+                       ,@rator-eff
+                       (,rator-triv ,@rand-triv*))))))
   (define Body
     (lambda (b)
       (match b
@@ -3371,9 +3376,7 @@
              `(with-label-alias ,label-alias
                 (with-global-data ,data
                   (with-closure-length ,closure-length
-                    (with-frame-information ,(if *collection-enabled*
-                                                frame-information
-                                                '())
+                    (with-frame-information ,frame-information
                       (letrec ,(append block blocks)
                         ,body)))))))])))
   (define Tail
@@ -3989,7 +3992,11 @@
                     (assq x (cdr l)))))]
         [val1
           (lambda (e env)
-            (cond [(symbol? e) (cdr (assq e env))]
+            (cond [(symbol? e)
+                   (call/cc
+                     (lambda (k)
+                       (inspect k)
+                       (cdr (assq e env))))]
                   [(eq? (car e) 'quote) (cadr e)]
                   [(eq? (car e) 'lambda)
                    (lambda (arg)
@@ -4047,7 +4054,7 @@
      (let ([count 50])
        (let ([yin
                ((lambda (cc)
-                  (display #\@)
+                  (display #\陰)
                   (set! count (- count 1))
                   (if (= count 0)
                       (lambda (x) (display #\newline))
@@ -4055,7 +4062,7 @@
                 (call/cc (lambda (c) c)))])
          (let ([yang
                  ((lambda (cc)
-                    (display #\*)
+                    (display #\陽)
                     (set! count (- count 1))
                     (if (= count 0)
                         (lambda (x) (display #\newline))

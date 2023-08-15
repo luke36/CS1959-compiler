@@ -368,7 +368,7 @@ static ptr walk(void *ra, ptr *top) {
     ptr *bot = top - nptr;
     for (long i = 1; i < nptr; i++)
       if (ITH_LIVE(mask_start, i)) {
-        wprintf(L";     %ld.\t ", i);
+        wprintf(L";     %ld.\t\t", i);
         print(*(bot + i));
         wprintf(L"\n");
       }
