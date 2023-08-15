@@ -306,7 +306,7 @@
           [#t '(quote #t)]
           [#f '(quote #f)]
           [,n (guard (integer? x) (exact? x) (fixnum-range? x)) `(quote ,n)]
-          [,ch (guard (char? ch) (<= 0 (char->integer ch)) (>= 127 (char->integer ch))) `(quote ,ch)] ; ascii only
+          [,ch (guard (char? ch)) `(quote ,ch)] ; ascii only
           [,var (guard (symbol? var)) ((Var env) var)]
           [(,proc ,[(Expr env) -> arg*] ...) (guard (assq proc env))
            `(,((Expr env) proc) ,arg* ...)]
@@ -4041,24 +4041,27 @@
                     (lambda (y) x))))))
 
 (define yin-yang
-  '(let ([count 50])
-     (let ([yin
-             ((lambda (cc)
-                (display #\@)
-                (set! count (- count 1))
-                (if (= count 0)
-                    (lambda (x) (display #\newline))
-                    cc))
-              (call/cc (lambda (c) c)))])
-       (let ([yang
+  '(begin
+     (display #\;)
+     (display #\space)
+     (let ([count 50])
+       (let ([yin
                ((lambda (cc)
-                  (display #\*)
+                  (display #\@)
                   (set! count (- count 1))
                   (if (= count 0)
                       (lambda (x) (display #\newline))
                       cc))
                 (call/cc (lambda (c) c)))])
-         (yin yang)))))
+         (let ([yang
+                 ((lambda (cc)
+                    (display #\*)
+                    (set! count (- count 1))
+                    (if (= count 0)
+                        (lambda (x) (display #\newline))
+                        cc))
+                  (call/cc (lambda (c) c)))])
+           (yin yang))))))
 
 (define debug-trace
   '(letrec ([kk #f]

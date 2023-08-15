@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <wchar.h>
 
 #define stack_size 100000
 /* set this to 1 to stress the GC */
@@ -115,7 +116,7 @@ int main(int argc, char *argv[]) {
 
  /* run the Scheme program and print the result */
   print(SCHEME_ENTRY(stack, heap, heap + heapsize));
-  printf("\n");
+  wprintf(L"\n");
 
   return 0;
 }
@@ -257,74 +258,74 @@ typedef long ptr;
 
 static void print1(ptr x, int d) {
   if (TAG(x, mask_fixnum) == tag_fixnum) {
-    printf("%ld", (long)UNFIX(x));
+    wprintf(L"%ld", (long)UNFIX(x));
   } else if (TAG(x, mask_pair) == tag_pair) {
     int len = 0;
     ptr y;
     
     if (d > MAXDEPTH) {
-      printf("(...)");
+      wprintf(L"(...)");
       return;
     }
-    printf("(");
+    wprintf(L"(");
     print1(CAR(x), d+1);
     y = CDR(x);
     while (TAG(y, mask_pair) == tag_pair && (len < MAXLENGTH-1)) {
-      printf(" ");
+      wprintf(L" ");
       print1(CAR(y), d+1);
       y = CDR(y);
       len++;
     }
     if (y != _nil)
       if (len == MAXLENGTH-1)
-        printf(" ...");
+        wprintf(L" ...");
       else {
-        printf(" . ");
+        wprintf(L" . ");
         print1(y, d+1);
       }
-    printf(")");
+    wprintf(L")");
   } else if (TAG(x, mask_vector) == tag_vector) {
     long i, n;
     ptr *p;
     if (d > MAXDEPTH) {
-      printf("#(...)");
+      wprintf(L"#(...)");
       return;
     }
-    printf("#(");
+    wprintf(L"#(");
     n = UNFIX(VECTORLENGTH(x));
     p = VECTORDATA(x);
     i = n > MAXLENGTH ? MAXLENGTH : n;
     if (i != 0) {
       print1(*p, d+1);
       while (--i) {
-        printf(" ");
+        wprintf(L" ");
         print1(*++p, d+1);
       }
     }
-    if (n > MAXLENGTH) printf(" ..."); 
-    printf(")");
+    if (n > MAXLENGTH) wprintf(L" ..."); 
+    wprintf(L")");
   } else if (TAG(x, mask_procedure) == tag_procedure) {
     int n = CLOSURESIZE(x);
     if (n == continuation_special_flag)
-      printf("#<continuation>");
+      wprintf(L"#<continuation>");
     else
-      printf("#<procedure>");
+      wprintf(L"#<procedure>");
   } else if (x == _false) {
-    printf("#f");
+    wprintf(L"#f");
   } else if (x == _true) {
-    printf("#t");
+    wprintf(L"#t");
   } else if (x == _nil) {
-    printf("()");
+    wprintf(L"()");
   } else if (x == _void) {
-    printf("#<void>");
+    wprintf(L"#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
-    printf("%s", SCHEME_SYMBOL_TO_ADDRESS(x));
+    wprintf(L"%s", SCHEME_SYMBOL_TO_ADDRESS(x));
   } else if (TAG(x, mask_char) == tag_char) {
-    char c = CHAR(x);
+    wchar_t c = CHAR(x);
     if (c <= 32)
-      printf("#\\x%x", c);
+      wprintf(L"#\\x%x", c);
     else
-      printf("#\\%c", c);
+      wprintf(L"#\\%c", c);
   }
 }
 
@@ -335,7 +336,7 @@ static void print(ptr x) {
 #else /* SCHEME_PRINTER */
 
 static void print(long x) {
-    printf("%ld", x);
+    wprintf(L"%ld", x);
 } 
 
 #endif /* SCHEME_PRINTER */
@@ -354,11 +355,11 @@ static ptr walk(void *ra, ptr *top) {
   int d = 0;
   while (d < MAXFRAME) {
     if (ra == SCHEME_EXIT || d > MAXFRAME) {
-      printf("#<system continuation>\n");
+      wprintf(L";   #<system continuation>\n");
       return _void;
     } else {
-      printf("#<continuation>\n");
-      printf("  frame variables:\n");
+      wprintf(L";   #<continuation>\n");
+      wprintf(L";     frame variables:\n");
     }
     long size = FRAME_SIZE(ra);
     long nptr = UNFIX(size);
@@ -367,15 +368,15 @@ static ptr walk(void *ra, ptr *top) {
     ptr *bot = top - nptr;
     for (long i = 1; i < nptr; i++)
       if (ITH_LIVE(mask_start, i)) {
-        printf("  %ld.\t ", i);
+        wprintf(L";     %ld.\t ", i);
         print(*(bot + i));
-        printf("\n");
+        wprintf(L"\n");
       }
     ra = (void *)bot[0];
     top = bot;
     d++;
   }
-  printf("...\n");
+  wprintf(L"...\n");
   return _void;
 }
 
@@ -386,8 +387,9 @@ ptr inspect(ptr x) {
       return walk(CONTINUATIONRETURNADDRESS(x),
                   CONTINUATIONSTACK(x) + UNFIX(CONTINUATIONSTACKSIZE(x)));
   }
+  wprintf(L";   ");
   print(x);
-  printf("\n");
+  wprintf(L"\n");
   return _void;
 }
 
@@ -398,15 +400,15 @@ ptr write_ptr(ptr x) {
 
 ptr display_ptr(ptr x) {
   if (TAG(x, mask_char) == tag_char) {
-    char c = CHAR(x);
+    wchar_t c = CHAR(x);
     if (c == '\n')
-      printf("\n");
+      wprintf(L"\n");
     else if (c == '\t')
-      printf("\t");
+      wprintf(L"\t");
     else if (c == ' ')
-      printf(" ");
+      wprintf(L" ");
     else if (c > 32)
-      printf("%c", c);
+      wprintf(L"%c", c);
   } else
     print(x);
   return _void;
