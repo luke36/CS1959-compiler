@@ -1,4 +1,4 @@
-;; todo: unicode and #\x00 in symbol name; division and modulo
+;; todo: unicode and #\x00 in symbol name; division and modulo; SCC in purify-letrec; some chances of constant propagation (purify-letrec, convert-assignments)
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -454,50 +454,74 @@
     (match p
       [,[Expr -> e a] e])))
 
-(define-who purify-letrec
+(define-who purify-letrec ; see ``fixing letrec''
   (define simple?
-    (lambda (x* reduc-now?)
+    (lambda (x* no-capture? no-effect?)
       (lambda (e)
         (match e
           [(if ,cond ,conseq ,alter)
-           (and ((simple? x* reduc-now?) cond)
-                ((simple? x* reduc-now?) conseq)
-                ((simple? x* reduc-now?) alter))]
+           (and ((simple? x* no-capture? no-effect?) cond)
+                ((simple? x* no-capture? no-effect?) conseq)
+                ((simple? x* no-capture? no-effect?) alter))]
           [(begin ,expr* ... ,expr)
-           (andmap (simple? x* reduc-now?) (cons expr expr*))]
+           (for-all (simple? x* no-capture? no-effect?) (cons expr expr*))]
           [(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))
-           (andmap (simple? x* reduc-now?) (cons expr expr*))]
-          [(letrec ([,uvar* ,expr*] ...) ,body) ((simple? x* reduc-now?) body)]
-          [(set! ,uvar ,expr) ((simple? x* reduc-now?) expr)]
-          [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f) expr)]
+           (for-all (simple? x* no-capture? no-effect?) (cons expr expr*))]
+          [(letrec ([,uvar* ,expr*] ...) ,body) ((simple? x* no-capture? no-effect?) body)]
+          [(set! ,uvar ,expr)
+           (if no-effect? #f
+               ((simple? x* no-capture? no-effect?) expr))]
+          [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f #f) expr)]
           [(call-with-current-continuation ,expr)
-           (if (eq? *standard* 'r6rs)
-               ((simple? x* reduc-now?) expr)
-               #f)]
+           (cond [no-effect? #f]
+                 [(and no-capture? (eq? *standard* 'r5rs)) #f]
+                 [else ((simple? x* no-capture? no-effect?) expr)])]
+          [(,prim ,rand* ...)
+           (guard (or (effect-primitive? prim)
+                      (side-effect-primitive? prim)))
+           (if no-effect? #f (for-all (simple? x* no-capture? no-effect?) rand*))]
           [(,prim ,rand* ...) (guard (primitive? prim))
-           (for-all (simple? x* reduc-now?) rand*)]
+           (for-all (simple? x* no-capture? no-effect?) rand*)]
           [(quote ,imm) #t]
           [(,proc ,arg* ...)
-           (if (eq? *standard* 'r6rs)
-               (andmap (simple? x* reduc-now?) (cons proc arg*))
-               (if reduc-now? #f (for-all (simple? x* #f) (cons proc arg*))))]
+           (cond [no-effect? #f]
+                 [(and no-capture? (eq? *standard* 'r5rs)) #f]
+                 [else (for-all (simple? x* no-capture? no-effect?) (cons proc arg*))])]
           [,x (guard (uvar? x)) (not (memq x x*))]))))
   (define partition
-    (lambda (x* b* as*)
-      (if (null? b*) (values '() '() '())
-          (let* ([b (car b*)]
-                 [x (car b)]
-                 [e (cadr b)])
-            (if (eq? (car e) 'letrec) ; assimilation: e = (letrec ([x e] ...) body)
-                (partition
-                  (append (map car (cadr e)) x*)
-                  (append (cadr e) (cons (list x (caddr e)) (cdr b*)))
-                  as*)
-                (let-values ([(simple* lambda* complex*) (partition x* (cdr b*) as*)])
-                  (cond [(memq x as*) (values simple* lambda* (cons b complex*))]
-                        [(lambda? e) (values simple* (cons b lambda*) complex*)]
-                        [((simple? x* #t) e) (values (cons b simple*) lambda* complex*)]
-                        [else (values simple* lambda* (cons b complex*))])))))))
+    (lambda (x* b* as* body-lambda? no-effect?)
+      (let loop ([x* x*] [b* b*] [simple* '()] [lambda* '()] [complex* '()])
+        (if (null? b*)
+            (values simple* lambda* complex*)
+            (let* ([b (car b*)]
+                   [x (car b)]
+                   [e (cadr b)])
+              (cond
+                [(and (memq x as*) (not body-lambda?))
+                 (loop x* (cdr b*) simple* lambda* (cons b complex*))]
+                [(and (not (eq? (car e) 'let))
+                      (not (eq? (car e) 'letrec))
+                      ((simple? x* #t no-effect?) e))
+                 (loop x* (cdr b*) (cons b simple*) lambda* complex*)]
+                [(lambda? e)
+                 (loop x* (cdr b*) simple* (cons b lambda*) complex*)]
+                [else
+                  (match e
+                    [(letrec ([,x*^ ,e*^] ...) ,body^)
+                     (loop (append x*^ x*) (cons (list x body^) (cdr b*))
+                       simple* (append `([,x*^ ,e*^] ...) lambda*) complex*)]
+                    [(let ([,x*^ ,e*^] ...) (assigned (,as*^ ...) ,body^))
+                     (let-values ([(simple*^ lambda*^ complex*^)
+                                   (partition (cons x x*^) `([,x*^ ,e*^] ...) as* (lambda? body^) #t)])
+                       (if (null? complex*^)
+                           (let ([complex*^ (filter (lambda (b) (memq (car b) as*^)) simple*^)]
+                                 [simple*^^ (remp (lambda (b) (memq (car b) as*^)) simple*^)])
+                             (loop (append x*^ x*) (cons (list x body^) (cdr b*))
+                               (append simple*^^ simple*)
+                               (append lambda*^ lambda*)
+                               (append complex*^ complex*)))
+                           (loop x* (cdr b*) simple* lambda* (cons b complex*))))]
+                    [,x (loop x* (cdr b*) simple* lambda* (cons b complex*))])]))))))
   (lambda (e)
     (match e
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
@@ -506,7 +530,7 @@
        `(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))]
       [(letrec ([,uvar* ,[expr*]] ...) (assigned (,as* ...) ,[body]))
        (let-values ([(simple* lambda* complex*)
-                     (partition uvar* `((,uvar* ,expr*) ...) as*)])
+                     (partition uvar* `((,uvar* ,expr*) ...) as* (lambda? body) #f)])
          (let* ([c-x* (map car complex*)]
                 [c-e* (map cadr complex*)]
                 [tmp* (map unique-name c-x*)]

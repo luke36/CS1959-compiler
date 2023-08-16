@@ -9,6 +9,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <wchar.h>
+#include <locale.h>
 
 #define stack_size 100000
 /* set this to 1 to stress the GC */
@@ -54,6 +55,11 @@ int main(int argc, char *argv[]) {
   struct sigaction action;
   sigset_t s_set;
   int n;
+
+  if (setlocale(LC_CTYPE, "") == NULL) {
+    fprintf(stderr, "setlocale failed: %s\n", strerror(errno));
+    exit(4);
+  }
 
   pagesize = sysconf(_SC_PAGESIZE);
 
@@ -325,7 +331,7 @@ static void print1(ptr x, int d) {
     if (c <= 32)
       wprintf(L"#\\x%x", c);
     else
-      wprintf(L"#\\%c", c);
+      wprintf(L"#\\%C", c);
   }
 }
 
@@ -414,7 +420,7 @@ ptr display_ptr(ptr x) {
     else if (c == ' ')
       wprintf(L" ");
     else if (c > 32)
-      wprintf(L"%c", c);
+      wprintf(L"%C", c);
   } else
     print(x);
   return _void;

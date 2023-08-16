@@ -43,8 +43,8 @@ Comparison:
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5815
-       average code length:  35.457317073170735
+       total code length:    5814
+       average code length:  35.451219512195124
 (time (test-all-analyze))
     62 collections
     0.186370017s elapsed cpu time, including 0.003754762s collecting
@@ -71,8 +71,8 @@ the best I can do is:
        average free var:        0.835820895522388
 
 ** code length report **
-       total code length:    5110
-       average code length:  31.158536585365855
+       total code length:    5109
+       average code length:  31.152439024390244
 ```
 
 but with extra runtime supports.
