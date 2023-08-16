@@ -1,4 +1,4 @@
-;; todo: is optimize-global (mostly) subsumed by a strong enough partial evaluator?; carefully reorder evalution of arguments
+;; todo: unicode and #\x00 in symbol name; division and modulo
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -246,9 +246,9 @@
                          [body* (map (Expr env) (cdr cls))])
                     (if (and (eq? cond 'else)
                              (not (assq 'else env)))
-                        `(begin ,@body*)
+                        (make-begin body*)
                         `(if ,((Expr env) cond)
-                             (begin ,@body*)
+                             ,(make-begin body*)
                              ,(convert-cond (cdr clause*) env))))])))
   (define convert-quasiquote
     (lambda (qd env)
@@ -287,7 +287,7 @@
                                     (loop (add1 i)))
                                   '()))])
                      `(let ([,tmp (make-vector (quote ,length))])
-                        (begin ,@fill ,tmp)))))]
+                        ,(make-begin `(,@fill ,tmp))))))]
             [else
               (check-datum qd)
               `(quote ,qd)])))
@@ -337,7 +337,8 @@
           [(cdadr ,[(Expr env) -> expr]) `(cdr (car (cdr ,expr)))]
           [(cddar ,[(Expr env) -> expr]) `(cdr (cdr (car ,expr)))]
           [(cdddr ,[(Expr env) -> expr]) `(cdr (cdr (cdr ,expr)))]
-          [(begin ,[(Expr env) -> expr*] ... ,[(Expr env) -> expr]) `(begin ,expr* ... ,expr)]
+          [(begin ,[(Expr env) -> expr*] ... ,[(Expr env) -> expr])
+           (make-begin `(,expr* ... ,expr))]
           [(set! ,var ,[(Expr env) -> expr])
            (if (not (symbol? var))
                (format-error who "invalid syntax ~s" x)
@@ -348,14 +349,16 @@
            (let* ([uvar* (map unique-name formal*)]
                   [env^ (append (map cons formal* uvar*) env)]
                   [body* (map (Expr env^) expr*)])
-             `(lambda (,uvar* ...) (begin ,body* ...)))]
+             `(lambda (,uvar* ...)
+                ,(make-begin `(,body* ...))))]
           [(let ([,var* ,[(Expr env) -> expr*]] ...) ,body* ...)
            (if (<= (length body*) 0) (format-error who "invalid syntax ~s" x))
            (check-bind-variable var* x)
            (let* ([uvar* (map unique-name var*)]
                   [env^ (append (map cons var* uvar*) env)]
                   [body*^ (map (Expr env^) body*)])
-             `(let ([,uvar* ,expr*] ...) (begin ,body*^ ...)))]
+             `(let ([,uvar* ,expr*] ...)
+                ,(make-begin `(,body*^ ...))))]
           [(letrec ([,var* ,expr*] ...) ,body* ...)
            (if (<= (length body*) 0) (format-error who "invalid syntax ~s" x))
            (check-bind-variable var* x)
@@ -363,7 +366,8 @@
                   [env^ (append (map cons var* uvar*) env)]
                   [expr*^ (map (Expr env^) expr*)]
                   [body*^ (map (Expr env^) body*)])
-             `(letrec ([,uvar* ,expr*^] ...) (begin ,body*^ ...)))]
+             `(letrec ([,uvar* ,expr*^] ...)
+                ,(make-begin `(,body*^ ...))))]
           [(,[(Expr env) -> proc] ,[(Expr env) -> arg*] ...) `(,proc ,arg* ...)]
           [,x (format-error who "invalid expression ~s" x)]))))
   (lambda (p) ((Expr '()) p)))
@@ -484,11 +488,16 @@
           (let* ([b (car b*)]
                  [x (car b)]
                  [e (cadr b)])
-            (let-values ([(simple* lambda* complex*) (partition x* (cdr b*) as*)])
-              (cond [(memq x as*) (values simple* lambda* (cons b complex*))]
-                    [(lambda? e) (values simple* (cons b lambda*) complex*)]
-                    [((simple? x* #t) e) (values (cons b simple*) lambda* complex*)]
-                    [else (values simple* lambda* (cons b complex*))]))))))
+            (if (eq? (car e) 'letrec) ; assimilation: e = (letrec ([x e] ...) body)
+                (partition
+                  (append (map car (cadr e)) x*)
+                  (append (cadr e) (cons (list x (caddr e)) (cdr b*)))
+                  as*)
+                (let-values ([(simple* lambda* complex*) (partition x* (cdr b*) as*)])
+                  (cond [(memq x as*) (values simple* lambda* (cons b complex*))]
+                        [(lambda? e) (values simple* (cons b lambda*) complex*)]
+                        [((simple? x* #t) e) (values (cons b simple*) lambda* complex*)]
+                        [else (values simple* lambda* (cons b complex*))])))))))
   (lambda (e)
     (match e
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
@@ -695,6 +704,7 @@
           [,[(Expr 'value) -> e u] e])
         prog)))
 
+;; todo: is optimize-global (mostly) subsumed by a strong enough partial evaluator?
 (define-who uncover-outmost
   (define non-capture?
     (lambda (e)
