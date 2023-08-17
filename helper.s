@@ -16,8 +16,8 @@ DL_DEFAULT:
     movq %rcx, %rsi
     jmp DL_GO_UP
 DL_CASE_PAIR:
-    movq %rdx, %rsi
-    addq $16, %rdx
+    movq %r11, %rsi
+    addq $16, %r11
     addq $1, %rsi
     movq $-2, -1(%rsi)
     movq %rax, 7(%rsi)
@@ -30,17 +30,17 @@ DL_CASE_TRIVIAL:
 DL_CASE_VECTOR:
     movq 0(%r8), %rdi
     addq $8, %r8
-    movq %rdx, %rsi
-    addq %rdi, %rdx
-    addq $8, %rdx
+    movq %r11, %rsi
+    addq %rdi, %r11
+    addq $8, %r11
     addq $3, %rsi
     movq $0, -3(%rsi)
     movq %rax, -3(%rsi, %rdi)
     movq %rsi, %rax
     jmp DL_LOOP_ENTRY
 DL_CASE_EMPTY_VECTOR:
-    movq %rdx, %rsi
-    addq $8, %rdx
+    movq %r11, %rsi
+    addq $8, %r11
     addq $3, %rsi
     movq $0, -3(%rsi)
     cmpq $-2, %rax
@@ -95,7 +95,7 @@ _scheme_symbol_to_address:
     .globl _scheme_call_with_current_continuation
 _scheme_call_with_current_continuation:
 CALLCC_CHECK_OVERFLOW:
-    movq %rdx, %rcx
+    movq %r11, %rcx
     addq %rbp, %rcx
     subq %r14, %rcx
     addq $24, %rcx
@@ -109,12 +109,12 @@ CALLCC_COLLECT:
     movq %r8, %r12
     call collect
     movq %r12, %r8
-    movq %rax, %rdx
+    movq %rax, %r11
     movq 0(%rbp), %r13
 CALLCC_MAKE_CONT:
-    movq %rdx, %r9
+    movq %r11, %r9
     addq $2, %r9
-    addq $24, %rdx
+    addq $24, %r11
     leaq _scheme_invoke_continuation(%rip), %r10
     movq %r10, -2(%r9)
     movq %r15, 6(%r9)
@@ -127,11 +127,11 @@ CALLCC_LOOP_ENTRY:
     je CALLCC_APPLY
 CALLCC_DO_COPY:
     movq 0(%rbx, %r14), %r10
-    movq %r10, 0(%rdx, %rbx)
+    movq %r10, 0(%r11, %rbx)
     addq $8, %rbx
     jmp CALLCC_LOOP_ENTRY
 CALLCC_APPLY:
-    addq %rcx, %rdx
+    addq %rcx, %r11
     jmp *-2(%r8)
 
     .quad -1
@@ -158,32 +158,32 @@ _scheme_collect:
     movq %rbp, %rsi
     leaq 0(%rbp), %rdx
     call collect
-    movq %rax, %rdx
+    movq %rax, %r11
     movq 0(%rbp), %r13
     jmp *%r15
 
     .globl _scheme_inspect
 _scheme_inspect:
     movq %r8, %rdi
-    movq %rdx, %r12
+    movq %r11, %r12
     call inspect
-    movq %r12, %rdx
+    movq %r12, %r11
     jmp *%r15
 
     .globl _scheme_write
 _scheme_write:
     movq %r8, %rdi
-    movq %rdx, %r12
+    movq %r11, %r12
     call write_ptr
-    movq %r12, %rdx
+    movq %r12, %r11
     jmp *%r15
 
     .globl _scheme_display
 _scheme_display:
     movq %r8, %rdi
-    movq %rdx, %r12
+    movq %r11, %r12
     call display_ptr
-    movq %r12, %rdx
+    movq %r12, %r11
     jmp *%r15
 
     .globl _scheme_read_char

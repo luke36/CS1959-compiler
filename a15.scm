@@ -1,4 +1,4 @@
-;; todo: division and modulo; use SCC in purify-letrec
+;; todo: use SCCs in purify-letrec
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -22,6 +22,7 @@
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
 (define disp-root-globals 0)
+(set! allocation-pointer-register 'r11) ; leave rdx division
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
 (define return-address-location 'fv0)
@@ -55,7 +56,7 @@
 (define id (lambda (x) x))
 
 (define binops
-  '(+ - * logand logor sra ash))
+  '(+ - * logand logor sra ash div mod))
 (define binop?
   (lambda (x)
     (memq x binops)))
@@ -141,7 +142,7 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char call-with-current-continuation))
+  '(+ - * div mod car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char call-with-current-continuation))
 (define side-effect-primitives
   '(read-char call-with-current-continuation))
 (define predicate-primitives
@@ -163,6 +164,8 @@
   '([+             . 2]
     [-             . 2]
     [*             . 2]
+    [div           . 2]
+    [mod           . 2]
     [car           . 1]
     [cdr           . 1]
     [cons          . 2]
@@ -488,42 +491,42 @@
                  [(and no-capture? (eq? *standard* 'r5rs)) #f]
                  [else (for-all (simple? x* no-capture? no-effect?) (cons proc arg*))])]
           [,x (guard (uvar? x)) (not (memq x x*))]))))
+  (define effect-free? (simple? '() #f #t))
   (define partition
     (lambda (x* b* as* body-lambda? no-effect?)
-      (let loop ([x* x*] [b* b*] [simple* '()] [lambda* '()] [complex* '()])
+      (let loop ([x* x*] [b* b*] [as* as*] [simple* '()] [lambda* '()] [complex* '()])
         (if (null? b*)
-            (values simple* lambda* complex*)
+            (values as* simple* lambda* complex*)
             (let* ([b (car b*)]
                    [x (car b)]
                    [e (cadr b)])
               (cond
                 [(and (memq x as*) (not body-lambda?))
-                 (loop x* (cdr b*) simple* lambda* (cons b complex*))]
+                 (loop x* (cdr b*) as* simple* lambda* (cons b complex*))]
+                [(and (not (memq x as*)) (lambda? e))
+                 (loop x* (cdr b*) as* simple* (cons b lambda*) complex*)]
                 [(and (not (eq? (car e) 'let))
                       (not (eq? (car e) 'letrec))
                       ((simple? x* #t no-effect?) e))
-                 (loop x* (cdr b*) (cons b simple*) lambda* complex*)]
-                [(lambda? e)
-                 (loop x* (cdr b*) simple* (cons b lambda*) complex*)]
+                 (loop x* (cdr b*) as* (cons b simple*) lambda* complex*)]
                 [else
                   (match e
                     [(letrec ([,x*^ ,e*^] ...) ,body^)
                      (loop (append x*^ x*) (cons (list x body^) (cdr b*))
-                       simple* (append `([,x*^ ,e*^] ...) lambda*) complex*)]
+                       as* simple* (append `([,x*^ ,e*^] ...) lambda*) complex*)]
                     [(let ([,x*^ ,e*^] ...) (assigned (,as*^ ...) ,body^))
-                     (let-values ([(simple*^ lambda*^ complex*^)
-                                   (partition x* `([,x*^ ,e*^] ...) as*^
-                                     ((simple? '() #f #t) body^) ; or lambda?
+                     (let-values ([(as*^^ simple*^ lambda*^ complex*^)
+                                   (partition '() `([,x*^ ,e*^] ...) as*^
+                                     (effect-free? body^) ; or lambda?
                                      #t)])
                        (if (null? complex*^)
-                           (let ([complex*^^ (filter (lambda (b) (memq (car b) as*^)) simple*^)]
-                                 [simple*^^ (remp (lambda (b) (memq (car b) as*^)) simple*^)])
-                             (loop (append x*^ x*) (cons (list x body^) (cdr b*))
-                               (append simple*^^ simple*)
-                               (append lambda*^ lambda*)
-                               (append complex*^^ complex*)))
-                           (loop x* (cdr b*) simple* lambda* (cons b complex*))))]
-                    [,x (loop x* (cdr b*) simple* lambda* (cons b complex*))])]))))))
+                           (loop (append x*^ x*) (cons (list x body^) (cdr b*))
+                             (append as*^^ as*^ as*)
+                             (append simple*^ simple*)
+                             (append lambda*^ lambda*)
+                             complex*)
+                           (loop x* (cdr b*) as* simple* lambda* (cons b complex*))))]
+                    [,x (loop x* (cdr b*) as* simple* lambda* (cons b complex*))])]))))))
   (lambda (e)
     (match e
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
@@ -531,8 +534,8 @@
       [(let ([,uvar* ,[expr*]] ...) (assigned (,as* ...) ,[expr]))
        `(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))]
       [(letrec ([,uvar* ,[expr*]] ...) (assigned (,as* ...) ,[body]))
-       (let-values ([(simple* lambda* complex*)
-                     (partition uvar* `((,uvar* ,expr*) ...) as* #f #f)])
+       (let-values ([(as* simple* lambda* complex*)
+                     (partition uvar* `((,uvar* ,expr*) ...) as* (effect-free? body) #f)])
          (let* ([c-x* (map car complex*)]
                 [c-e* (map cadr complex*)]
                 [tmp* (map unique-name c-x*)]
@@ -543,7 +546,8 @@
                             (assigned ()
                               (begin (set! ,c-x* ,tmp*) ...)))
                           ,body)))])
-           (make-let-assigned simple* '()
+           (make-let-assigned simple*
+             (intersection (map car simple*) as*)
              (make-let-assigned `([,c-x* (void)] ...)
                c-x*
                (make-letrec lambda*
@@ -563,6 +567,8 @@
         [+             +]
         [-             -]
         [*             *]
+        [div           div]
+        [mod           mod]
         [car           car]
         [cdr           cdr]
         [cons          cons]
@@ -1486,6 +1492,8 @@
                          `(* ,rand1 ,rand2))
                        `(sra ,rand2 ,shift-fixnum)))
                    rand1)])]
+        [(div ,[Value -> rand1] ,[Value -> rand2]) `(ash (div ,rand1 ,rand2) ,shift-fixnum)]
+        [(mod ,[Value -> rand1] ,[Value -> rand2]) `(mod ,rand1 ,rand2)]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
         [(char->integer ,[Value -> ch])
@@ -2590,6 +2598,14 @@
   Program)
 
 (define-who select-instructions
+  (define div/mod?
+    (lambda (x)
+      (or (eq? x 'div) (eq? x 'mod))))
+  (define div/mod->result-register
+    (lambda (div/mod)
+      (match div/mod
+        [div 'rax]
+        [mod 'rdx])))
   (define not-so-trivial?
     (lambda (x)
       (or (frame-var? x)
@@ -2722,6 +2738,35 @@
                      (values
                        (make-begin (cons `(set! ,temp ,base) (list eff)))
                        (cons temp u))))])]
+        [(set! ,v (,div/mod ,x ,y)) (guard (div/mod? div/mod) (or (label? y) (integer? y)))
+         (let ([t (unique-name 'u)])
+           (let-values ([(eff u) (Effect `(set! ,v (,div/mod ,x ,t)))])
+             (values
+               (make-begin (cons `(set! ,t ,y) (list eff)))
+               (cons t u))))]
+        [(set! rax (div rax ,y))
+         (values `(begin (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
+        [(set! rdx (mod rax ,y))
+         (values `(begin (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
+        [(set! rax (div ,x ,y))
+         (values `(begin (set! rax ,x)
+                         (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
+        [(set! rdx (mod ,x ,y))
+         (values `(begin (set! rax ,x)
+                         (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
+        [(set! ,v (,div/mod rax ,y)) (guard (div/mod? div/mod))
+         (values `(begin (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))
+                         (set! ,v ,(div/mod->result-register div/mod))) '())]
+        [(set! ,v (,div/mod ,x ,y)) (guard (div/mod? div/mod))
+         (values `(begin (set! rax ,x)
+                         (set! rdx (sign-of rax))
+                         (set! (rax rdx) (div (rax rdx) ,y))
+                         (set! ,v ,(div/mod->result-register div/mod))) '())]
         [(set! ,v (,rator ,v ,x))
          (cond [(and (eq? rator '*) (frame-var? v))
                 (let ([temp (unique-name 'u)])
@@ -2887,6 +2932,10 @@
              ((Effect* live) effect*)]
             [(mset! ,base ,offset ,expr)
              (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
+            [(set! rdx (sign-of rax))
+             (set-cons 'rdx (set-cons 'rax post))]
+            [(set! (rax rdx) (div (rax rdx) ,y))
+             (liveset-cons y (set-cons 'rdx (set-cons 'rax post)))]
             [(set! ,v (,rator ,x ,y))
              (let ([post-rhs (difference post (list v))])
                (add-conflict-list v post-rhs)
@@ -3307,6 +3356,9 @@
            `(return-point ,label ,size ,live ,tail)]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
+          [(set! rdx (sign-of rax)) e]
+          [(set! (rax rdx) (div (rax rdx) ,[(Triv map) -> y]))
+           `(set! (rax rdx) (div (rax rdx) ,y))]
           [(set! ,[(Var map) -> v1] (,op ,[(Triv map) -> v2] ,[(Triv map) -> x]))
            `(set! ,v1 (,op ,v2 ,x))]
           [(set! ,[(Var map) -> var] ,[(Triv map) -> triv])
@@ -3378,6 +3430,9 @@
            (values `(return-point ,label ,size ,live ,tail) offset)]
           [(mset! ,[(Triv offset) -> base] ,[(Triv offset) -> off] ,[(Triv offset) -> expr])
            (values `(mset! ,base ,off ,expr) offset)]
+          [(set! rdx (sign-of rax)) (values e offset)]
+          [(set! (rax rdx) (div (rax rdx) ,[(Triv offset) -> y]))
+           (values `(set! (rax rdx) (div (rax rdx) ,y)) offset)]
           [(set! ,[(Var offset) -> v1] (,op ,[(Triv offset)  -> v2] ,[(Triv offset) -> x]))
            (if (eq? v1 frame-pointer-register)
                (cond [(and (eq? op '+) (integer? x))
@@ -3892,6 +3947,9 @@
                      (number? base) (zero? base))
                 (emit 'movq (rand->x86-64-arg expr) (Label offset))]
                [else (Statement `(set! ,(BaseOffset base offset) ,expr))])]
+        [(set! rdx (sign-of rax)) (emit 'cqto)]
+        [(set! (rax rdx) (div (rax rdx) ,y))
+         (emit 'idivq y)]
         [(set! ,v (mref ,base ,offset))
          (cond [(and (or (label? base) (string? base))
                      (number? offset) (zero? offset))
@@ -4057,43 +4115,43 @@
                              [else ((val1 (car e) env) (val1 (cadr e) env))]))])
             (lambda (e) (val1 e '())))]
         [read-back
-          (let ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
-                [c 0]
-                [created-neutral '()])
-            (letrec ([newvar
-                       (lambda ()
-                         (set! c (+ c 1))
-                         (letrec ([locate
-                                    (lambda (i l)
-                                      (if (eq? i 1)
-                                          (car l)
-                                          (locate (- i 1) (cdr l))))])
-                           (locate c uvars)))]
-                     [neutral?1
-                       (lambda (x l)
-                         (cond [(null? l) #f]
-                               [(eq? (caar l) x) (cdar l)]
-                               [else (neutral?1 x (cdr l))]))]
-                     [neutral?
-                       (lambda (x) (neutral?1 x created-neutral))]
-                     [create-neutral
-                       (lambda (e)
-                         (letrec ([ne (lambda (y)
-                                        (create-neutral (cons ne y)))])
-                           (set! created-neutral (cons (cons ne e) created-neutral))
-                           ne))])
-              (lambda (e)
-                (cond [(neutral? e)
-                       (let ([app (neutral? e)])
-                         (if (symbol? app) app
-                             (let ([rator (car app)]
-                                   [rand (cdr app)])
-                               `(,(read-back rator) ,(read-back rand)))))]
-                      [(procedure? e)
-                       (let ([v (newvar)])
-                         (let ([ne (create-neutral v)])
-                           `(lambda (,v) ,(read-back (e ne)))))]
-                      [else `',e]))))]
+          (letrec ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
+                   [c 0]
+                   [created-neutral '()]
+                   [newvar
+                     (lambda ()
+                       (set! c (+ c 1))
+                       (letrec ([locate
+                                  (lambda (i l)
+                                    (if (eq? i 1)
+                                        (car l)
+                                        (locate (- i 1) (cdr l))))])
+                         (locate c uvars)))]
+                   [neutral?1
+                     (lambda (x l)
+                       (cond [(null? l) #f]
+                             [(eq? (caar l) x) (cdar l)]
+                             [else (neutral?1 x (cdr l))]))]
+                   [neutral?
+                     (lambda (x) (neutral?1 x created-neutral))]
+                   [create-neutral
+                     (lambda (e)
+                       (letrec ([ne (lambda (y)
+                                      (create-neutral (cons ne y)))])
+                         (set! created-neutral (cons (cons ne e) created-neutral))
+                         ne))])
+            (lambda (e)
+              (cond [(neutral? e)
+                     (let ([app (neutral? e)])
+                       (if (symbol? app) app
+                           (let ([rator (car app)]
+                                 [rand (cdr app)])
+                             `(,(read-back rator) ,(read-back rand)))))]
+                    [(procedure? e)
+                     (let ([v (newvar)])
+                       (let ([ne (create-neutral v)])
+                         `(lambda (,v) ,(read-back (e ne)))))]
+                    [else `',e])))]
         [normalize (lambda (e) (read-back (val e)))])
      (normalize '(((lambda (x) (lambda (y) (x y)))
                    (lambda (x) (x x)))

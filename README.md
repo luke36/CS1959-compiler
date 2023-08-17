@@ -43,8 +43,8 @@ Comparison:
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5814
-       average code length:  35.451219512195124
+       total code length:    5818
+       average code length:  35.47560975609756
 (time (test-all-analyze))
     62 collections
     0.186370017s elapsed cpu time, including 0.003754762s collecting
@@ -71,18 +71,21 @@ the best I can do is:
        average free var:        0.835820895522388
 
 ** code length report **
-       total code length:    5109
-       average code length:  31.152439024390244
+       total code length:    5112
+       average code length:  31.170731707317074
 ```
 
 but with extra runtime supports.
 
 ### additional features
-- simple IO
-- several syntactic extensions
-- basic symbol manipulation
-- option to encode large literals
-- naieve `call/cc`
+- `div`, `mod`
+- `display`, `write`, `read-char`
+- `cond`, `c[ad]r`, `quasiquote`
+- symbols, `symbol?`
+- characters, `char?`, `char->integer`, `integer->char`, `char=?`
+- long list literals
+- `call/cc`
+- `inspect` a continuation (a.k.a the stack)
 - (hopefully correct) garbage collection
 
 Conceptually bootstrapping is possible.
