@@ -1606,7 +1606,7 @@
             [(eq? i '()) $nil]
             [(symbol? i)
              (cond [(assq i symbol->index) =>
-                    (lambda (index) (+ tag-symbol (ash (cdr index) shift-fixnum)))]
+                    (lambda (index) (+ tag-symbol (cdr index)))]
                    [else (let ([index current-dump-length])
                            (set! symbol->index (cons (cons i index) symbol->index))
                            (set! current-dump-length
@@ -3941,6 +3941,7 @@
     (lambda (data)
       (match data
         [(symbol-dump ((quote ,sym*) ...))
+         (emit '.align "8")
          (emit '.globl "_scheme_symbol_dump")
          (emit-label "_scheme_symbol_dump")
          (if (null? sym*)
