@@ -87,7 +87,7 @@ DL_RETURN:
 
     .globl _scheme_symbol_to_address
 _scheme_symbol_to_address:
-    sarq $3, %rdi
+    subq $4, %rdi
     leaq _scheme_symbol_dump(%rip), %rax
     addq %rdi, %rax
     ret

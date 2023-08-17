@@ -1,4 +1,4 @@
-;; todo: unicode and #\x00 in symbol name; division and modulo; use SCC in purify-letrec; some chances of constant propagation in convert-assignments
+;; todo: division and modulo; use SCC in purify-letrec
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -1610,8 +1610,10 @@
                    [else (let ([index current-dump-length])
                            (set! symbol->index (cons (cons i index) symbol->index))
                            (set! current-dump-length
-                             (+ current-dump-length (add1 (string-length (symbol->string i)))))
-                           (+ tag-symbol (ash index shift-fixnum)))])]
+                             (+ current-dump-length
+                               8 ; 8 bit length + 8 bit characters
+                               (* 8 (string-length (symbol->string i)))))
+                           (+ tag-symbol index))])]
             [(integer? i) (ash i shift-fixnum)]
             [(char? i) (+ (ash (char->integer i) shift-char) tag-char)]
             [else
@@ -3916,8 +3918,6 @@
         (unless (zero? c)
           (Byte (mod x 256))
           (loop (- c 1) (div x 256))))))
-  (define Char
-    (lambda (ch) (Byte (char->integer ch))))
   (define Datum
     (lambda (lit)
       (cond [(pair? lit)
@@ -3950,8 +3950,11 @@
                (with-reverse-buffer 8 output-byte 0 ", 0x"
                  (for-each
                    (lambda (sym)
-                     (string-for-each Char (symbol->string sym))
-                     (Char #\x00))
+                     (let ([str (symbol->string sym)])
+                       (Ptr (string-length str))
+                       (string-for-each
+                         (lambda (ch) (Ptr (char->integer ch)))
+                         (symbol->string sym))))
                    sym*))
                (printf "\n")))]
         [(roots (,root* ...))
@@ -4103,7 +4106,7 @@
      (let ([count 50])
        (let ([yin
                ((lambda (cc)
-                  (display #\陰)
+                  (display '陰)
                   (set! count (- count 1))
                   (if (= count 0)
                       (lambda (x) (display #\newline))
@@ -4111,7 +4114,7 @@
                 (call/cc (lambda (c) c)))])
          (let ([yang
                  ((lambda (cc)
-                    (display #\陽)
+                    (display '陽)
                     (set! count (- count 1))
                     (if (= count 0)
                         (lambda (x) (display #\newline))

@@ -29,7 +29,7 @@
 extern long SCHEME_ROOTS;
 extern long SCHEME_ENTRY(char *, char *, char *);
 extern void SCHEME_EXIT(void);
-extern char *SCHEME_SYMBOL_TO_ADDRESS(long);
+extern long *SCHEME_SYMBOL_TO_ADDRESS(long);
 
 /* locally defined functions */
 static char *guarded_area(long n);
@@ -325,7 +325,16 @@ static void print1(ptr x, int d) {
   } else if (x == _void) {
     wprintf(L"#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
-    wprintf(L"%s", SCHEME_SYMBOL_TO_ADDRESS(x));
+    ptr *addr = SCHEME_SYMBOL_TO_ADDRESS(x);
+    long len = *(addr++);
+    wchar_t c;
+    for (; len > 0; len--, addr++) {
+      c = *addr;
+      if (c <= 32)
+        wprintf(L"\\x%x;", c);
+      else
+        wprintf(L"%C", c);
+    }
   } else if (TAG(x, mask_char) == tag_char) {
     wchar_t c = CHAR(x);
     if (c <= 32)
@@ -413,14 +422,7 @@ ptr write_ptr(ptr x) {
 ptr display_ptr(ptr x) {
   if (TAG(x, mask_char) == tag_char) {
     wchar_t c = CHAR(x);
-    if (c == '\n')
-      wprintf(L"\n");
-    else if (c == '\t')
-      wprintf(L"\t");
-    else if (c == ' ')
-      wprintf(L" ");
-    else if (c > 32)
-      wprintf(L"%C", c);
+    wprintf(L"%C", c);
   } else
     print(x);
   return _void;
