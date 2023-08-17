@@ -1,4 +1,4 @@
-;; todo: unicode and #\x00 in symbol name; division and modulo; SCC in purify-letrec; some chances of constant propagation (purify-letrec, convert-assignments)
+;; todo: unicode and #\x00 in symbol name; division and modulo; use SCC in purify-letrec; some chances of constant propagation in convert-assignments
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -512,14 +512,16 @@
                        simple* (append `([,x*^ ,e*^] ...) lambda*) complex*)]
                     [(let ([,x*^ ,e*^] ...) (assigned (,as*^ ...) ,body^))
                      (let-values ([(simple*^ lambda*^ complex*^)
-                                   (partition (cons x x*^) `([,x*^ ,e*^] ...) as* (lambda? body^) #t)])
+                                   (partition x* `([,x*^ ,e*^] ...) as*^
+                                     ((simple? '() #f #t) body^) ; or lambda?
+                                     #t)])
                        (if (null? complex*^)
-                           (let ([complex*^ (filter (lambda (b) (memq (car b) as*^)) simple*^)]
+                           (let ([complex*^^ (filter (lambda (b) (memq (car b) as*^)) simple*^)]
                                  [simple*^^ (remp (lambda (b) (memq (car b) as*^)) simple*^)])
                              (loop (append x*^ x*) (cons (list x body^) (cdr b*))
                                (append simple*^^ simple*)
                                (append lambda*^ lambda*)
-                               (append complex*^ complex*)))
+                               (append complex*^^ complex*)))
                            (loop x* (cdr b*) simple* lambda* (cons b complex*))))]
                     [,x (loop x* (cdr b*) simple* lambda* (cons b complex*))])]))))))
   (lambda (e)
@@ -530,7 +532,7 @@
        `(let ([,uvar* ,expr*] ...) (assigned (,as* ...) ,expr))]
       [(letrec ([,uvar* ,[expr*]] ...) (assigned (,as* ...) ,[body]))
        (let-values ([(simple* lambda* complex*)
-                     (partition uvar* `((,uvar* ,expr*) ...) as* (lambda? body) #f)])
+                     (partition uvar* `((,uvar* ,expr*) ...) as* #f #f)])
          (let* ([c-x* (map car complex*)]
                 [c-e* (map cadr complex*)]
                 [tmp* (map unique-name c-x*)]
@@ -4034,63 +4036,60 @@
 
 (define normalizer
   '(letrec
-       ([assq
-          (lambda (x l)
-            (if (null? l) #f
-                (if (eq? (car (car l)) x)
-                    (car l)
-                    (assq x (cdr l)))))]
-        [val1
-          (lambda (e env)
-            (cond [(symbol? e)
-                   (call/cc
-                     (lambda (k)
-                       (inspect k)
-                       (cdr (assq e env))))]
-                  [(eq? (car e) 'quote) (cadr e)]
-                  [(eq? (car e) 'lambda)
-                   (lambda (arg)
-                     (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
-                  [else ((val1 (car e) env) (val1 (cadr e) env))]))]
-        [val (lambda (e) (val1 e '()))]
-        [uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
-        [c 0]
-        [newvar
-          (lambda ()
-            (set! c (+ c 1))
-            (letrec ([locate
-                       (lambda (i l)
-                         (if (eq? i 1)
-                             (car l)
-                             (locate (- i 1) (cdr l))))])
-              (locate c uvars)))]
-        [created-neutral '()]
-        [neutral?1
-          (lambda (x l)
-            (cond [(null? l) #f]
-                  [(eq? (caar l) x) (cdar l)]
-                  [else (neutral?1 x (cdr l))]))]
-        [neutral?
-          (lambda (x) (neutral?1 x created-neutral))]
-        [create-neutral
-          (lambda (e)
-            (letrec ([ne (lambda (y)
-                           (create-neutral (cons ne y)))])
-              (set! created-neutral (cons (cons ne e) created-neutral))
-              ne))]
+       ([val
+          (letrec ([assq
+                     (lambda (x l)
+                       (if (null? l) #f
+                           (if (eq? (car (car l)) x)
+                               (car l)
+                               (assq x (cdr l)))))]
+                   [val1
+                     (lambda (e env)
+                       (cond [(symbol? e) (cdr (assq e env))]
+                             [(eq? (car e) 'quote) (cadr e)]
+                             [(eq? (car e) 'lambda)
+                              (lambda (arg)
+                                (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
+                             [else ((val1 (car e) env) (val1 (cadr e) env))]))])
+            (lambda (e) (val1 e '())))]
         [read-back
-          (lambda (e)
-            (cond [(neutral? e)
-                   (let ([app (neutral? e)])
-                     (if (symbol? app) app
-                         (let ([rator (car app)]
-                               [rand (cdr app)])
-                           `(,(read-back rator) ,(read-back rand)))))]
-                  [(procedure? e)
-                   (let ([v (newvar)])
-                     (let ([ne (create-neutral v)])
-                       `(lambda (,v) ,(read-back (e ne)))))]
-                  [else `',e]))]
+          (let ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
+                [c 0]
+                [created-neutral '()])
+            (letrec ([newvar
+                       (lambda ()
+                         (set! c (+ c 1))
+                         (letrec ([locate
+                                    (lambda (i l)
+                                      (if (eq? i 1)
+                                          (car l)
+                                          (locate (- i 1) (cdr l))))])
+                           (locate c uvars)))]
+                     [neutral?1
+                       (lambda (x l)
+                         (cond [(null? l) #f]
+                               [(eq? (caar l) x) (cdar l)]
+                               [else (neutral?1 x (cdr l))]))]
+                     [neutral?
+                       (lambda (x) (neutral?1 x created-neutral))]
+                     [create-neutral
+                       (lambda (e)
+                         (letrec ([ne (lambda (y)
+                                        (create-neutral (cons ne y)))])
+                           (set! created-neutral (cons (cons ne e) created-neutral))
+                           ne))])
+              (lambda (e)
+                (cond [(neutral? e)
+                       (let ([app (neutral? e)])
+                         (if (symbol? app) app
+                             (let ([rator (car app)]
+                                   [rand (cdr app)])
+                               `(,(read-back rator) ,(read-back rand)))))]
+                      [(procedure? e)
+                       (let ([v (newvar)])
+                         (let ([ne (create-neutral v)])
+                           `(lambda (,v) ,(read-back (e ne)))))]
+                      [else `',e]))))]
         [normalize (lambda (e) (read-back (val e)))])
      (normalize '(((lambda (x) (lambda (y) (x y)))
                    (lambda (x) (x x)))
