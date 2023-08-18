@@ -2580,6 +2580,9 @@
            `(mset! ,base ,offset (,op ,e1 ,e2))]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
+          [(set! rdx (sign-of rax)) e]
+          [(set! (rax rdx) (div (rax rdx) ,[(Triv map) -> y]))
+           `(set! (rax rdx) (div (rax rdx) ,y))]
           [(set! ,[(Var map) -> v1] (,op ,[(Triv map) -> v2] ,[(Triv map) -> x]))
            `(set! ,v1 (,op ,v2 ,x))]
           [(set! ,[(Var map) -> var] ,[(Triv map) -> triv])
@@ -2933,7 +2936,7 @@
             [(mset! ,base ,offset ,expr)
              (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
             [(set! rdx (sign-of rax))
-             (set-cons 'rdx (set-cons 'rax post))]
+             (set-cons 'rax (difference post '(rdx)))]
             [(set! (rax rdx) (div (rax rdx) ,y))
              (liveset-cons y (set-cons 'rdx (set-cons 'rax post)))]
             [(set! ,v (,rator ,x ,y))
