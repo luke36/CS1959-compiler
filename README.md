@@ -80,7 +80,7 @@ but with extra runtime supports.
 ### additional features
 - `quotient`, `remainder`
 - `display`, `write`, `read-char`
-- `cond`, `c[ad]+r`, `quasiquote`
+- `cond`, `c[ad]+r`, `quasiquote`, `unquote`
 - symbols, `symbol?`
 - characters, `char?`, `char->integer`, `integer->char`, `char=?`
 - long list literals

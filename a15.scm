@@ -2024,8 +2024,8 @@
            (values (make-begin `(,eff*^ ... ,tail)) l^ h^))]
         [(alloc ,expr)
          (if (number? expr)
-             (values e expr expr)
-             (values (wrap-with e expr) 0 0))]
+             (values t expr expr)
+             (values (wrap-with t expr) 0 0))]
         [,x (values x 0 0)])))
   (define Pred
     (lambda (c-low c-high a-low a-high)
@@ -3096,7 +3096,7 @@
                     assignment0
                     (cons (list uvar (car available)) assignment0))))]
         [else (format-error who
-                "no candidate for register assignment in ~s" graph)])))
+                "no candidate for register assignment in ~s" conf)])))
   (define Body
     (letrec ()
       (lambda (b)
@@ -3453,7 +3453,7 @@
                         [(alter^ offset2) ((Effect offset^) alter)])
              (if (= offset1 offset2)
                  (values `(if ,cond ,conseq^ ,alter^) offset1)
-                 (format-error who "inconsistent offsets in branches of ~s" p)))]
+                 (format-error who "inconsistent offsets in branches of ~s" e)))]
           [(begin ,effect* ... ,effect)
            (let*-values ([(effect*^ offset^) ((Effect* offset) effect*)]
                          [(effect^ offset^^) ((Effect offset^) effect)])
@@ -3592,7 +3592,7 @@
       (match t
         [(,lab) (guard (label? lab))
          (if (eq? (trace-graph lab) label)
-             (list `(,label (lambda () ,x)))
+             (list `(,label (lambda () ,t)))
              (begin (set! graph (cons (cons label lab) graph))
                     '()))]
         [,x (list `(,label (lambda () ,x)))])))
