@@ -3847,60 +3847,64 @@
        (emit 'popq 'rbx)
        (emit 'ret))]))
 
-(define reverse-buffer)
-(define reverse-size)
-(define reverse-max)
-(define reverse-first?)
-(define reverse-omissible?)
-(define reverse-padding)
-(define reverse-delim)
-(define reverse-out)
-(define reverse-init
-  (lambda ()
-    (set! reverse-buffer '())
-    (set! reverse-size 0)
-    (set! reverse-first? #t)))
-(define reverse-clear
-  (lambda ()
-    (if reverse-first?
-        (set! reverse-first? #f)
-        (printf "~a" reverse-delim))
-    (let loop ([head #t] [c reverse-size] [buf reverse-buffer])
-      (cond [(zero? c) (void)]
-            [(and head
-                  (reverse-omissible? (car buf))
-                  (> c 1))
-             (loop #t (sub1 c) (cdr buf))]
-            [else
-              (reverse-out (car buf))
-              (loop #f (sub1 c) (cdr buf))]))
-    (set! reverse-buffer '())
-    (set! reverse-size 0)))
-(define reverse-sweep
-  (lambda ()
-    (when reverse-padding
-      (unless (= 0 reverse-size)
-        (let loop ([i (- reverse-max reverse-size)])
-          (unless (= i 0)
-            (begin (reverse-put reverse-padding)
-                   (loop (sub1 i)))))))))
-(define reverse-put
-  (lambda (byte)
-    (set! reverse-buffer (cons byte reverse-buffer))
-    (set! reverse-size (add1 reverse-size))
-    (when (= reverse-size reverse-max) (reverse-clear))))
-(define-syntax with-reverse-buffer
-  (syntax-rules ()
-    [(_ g f p d o expr* ...)
-     (begin
-       (set! reverse-max g)
-       (set! reverse-out f)
-       (set! reverse-padding p)
-       (set! reverse-delim d)
-       (set! reverse-omissible? o)
-       (reverse-init)
-       expr* ...
-       (reverse-sweep))]))
+(module (use-reverse-buffer with-reverse-buffer reverse-put)
+  (define reverse-buffer)
+  (define reverse-size)
+  (define reverse-max)
+  (define reverse-first?)
+  (define reverse-omissible?)
+  (define reverse-padding)
+  (define reverse-delim)
+  (define reverse-out)
+  (define reverse-init
+    (lambda ()
+      (set! reverse-buffer '())
+      (set! reverse-size 0)
+      (set! reverse-first? #t)))
+  (define reverse-clear
+    (lambda ()
+      (if reverse-first?
+          (set! reverse-first? #f)
+          (printf "~a" reverse-delim))
+      (let loop ([head #t] [c reverse-size] [buf reverse-buffer])
+        (cond [(zero? c) (void)]
+              [(and head
+                    (reverse-omissible? (car buf))
+                    (> c 1))
+               (loop #t (sub1 c) (cdr buf))]
+              [else
+                (reverse-out (car buf))
+                (loop #f (sub1 c) (cdr buf))]))
+      (set! reverse-buffer '())
+      (set! reverse-size 0)))
+  (define reverse-sweep
+    (lambda ()
+      (when reverse-padding
+        (unless (= 0 reverse-size)
+          (let loop ([i (- reverse-max reverse-size)])
+            (unless (= i 0)
+              (begin (reverse-put reverse-padding)
+                     (loop (sub1 i)))))))))
+  (define reverse-put
+    (lambda (byte)
+      (set! reverse-buffer (cons byte reverse-buffer))
+      (set! reverse-size (add1 reverse-size))
+      (when (= reverse-size reverse-max) (reverse-clear))))
+  (define use-reverse-buffer
+    (lambda (g f p d o thunk)
+      (begin
+        (set! reverse-max g)
+        (set! reverse-out f)
+        (set! reverse-padding p)
+        (set! reverse-delim d)
+        (set! reverse-omissible? o)
+        (reverse-init)
+        (thunk)
+        (reverse-sweep))))
+  (define-syntax with-reverse-buffer
+    (syntax-rules ()
+      [(_ g f p d o expr* ...)
+       (use-reverse-buffer g f p d o (lambda () expr* ...))])))
 
 (define-who generate-x86-64
   (define BaseOffset
@@ -3934,7 +3938,7 @@
         [(quad ,dw) (emit '.quad (number->string dw))]
         [(live-mask ,n ,live)
          (printf "    .byte 0b")
-         (with-reverse-buffer 8 display 0 ", 0b" (lambda (x) (zero? x))
+         (with-reverse-buffer 8 display 0 ",0b" (lambda (x) (zero? x))
            (let loop ([i 0])
              (unless (= i n)
                (if (and (not (eq? i (frame-var->index return-address-location)))
@@ -4019,7 +4023,7 @@
              (emit '.ascii "\"\"")
              (begin
                (printf "    .quad 0x")
-               (with-reverse-buffer 8 output-byte 0 ", 0x" (lambda (x) (zero? x))
+               (with-reverse-buffer 8 output-byte 0 ",0x" (lambda (x) (zero? x))
                  (for-each
                    (lambda (sym)
                      (let ([str (symbol->string sym)])
@@ -4042,7 +4046,7 @@
         [(,lab (encode-literal (quote ,complex)))
          (emit-label lab)
          (printf "    .quad 0x")
-         (with-reverse-buffer 8 output-byte 0 ", 0x" (lambda (x) (zero? x))
+         (with-reverse-buffer 8 output-byte 0 ",0x" (lambda (x) (zero? x))
            (Datum complex))
          (printf "\n")])))
   (lambda (data*)
