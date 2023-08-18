@@ -332,6 +332,8 @@ static void print1(ptr x, int d) {
       c = *addr;
       if (c <= 32)
         wprintf(L"\\x%x;", c);
+      else if (c == L'\\')
+        wprintf(L"\\\\");
       else
         wprintf(L"%C", c);
     }
