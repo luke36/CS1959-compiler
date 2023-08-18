@@ -78,9 +78,9 @@ the best I can do is:
 but with extra runtime supports.
 
 ### additional features
-- `div`, `mod`
+- `quotient`, `remainder`
 - `display`, `write`, `read-char`
-- `cond`, `c[ad]r`, `quasiquote`
+- `cond`, `c[ad]+r`, `quasiquote`
 - symbols, `symbol?`
 - characters, `char?`, `char->integer`, `integer->char`, `char=?`
 - long list literals

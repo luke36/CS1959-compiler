@@ -1,4 +1,4 @@
-;; todo: use SCCs in purify-letrec
+;; todo: use SCCs in purify-letrec; remove useless set!
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -22,7 +22,7 @@
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
 (define disp-root-globals 0)
-(set! allocation-pointer-register 'r11) ; leave rdx division
+(set! allocation-pointer-register 'r11) ; leave rdx for division
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
 (define return-address-location 'fv0)
@@ -56,7 +56,7 @@
 (define id (lambda (x) x))
 
 (define binops
-  '(+ - * logand logor sra ash div mod))
+  '(+ - * logand logor sra ash quotient remainder))
 (define binop?
   (lambda (x)
     (memq x binops)))
@@ -142,7 +142,7 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * div mod car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char call-with-current-continuation))
+  '(+ - * quotient remainder car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code global-ref integer->char char->integer read-char call-with-current-continuation))
 (define side-effect-primitives
   '(read-char call-with-current-continuation))
 (define predicate-primitives
@@ -164,8 +164,8 @@
   '([+             . 2]
     [-             . 2]
     [*             . 2]
-    [div           . 2]
-    [mod           . 2]
+    [quotient      . 2]
+    [remainder     . 2]
     [car           . 1]
     [cdr           . 1]
     [cons          . 2]
@@ -567,8 +567,8 @@
         [+             +]
         [-             -]
         [*             *]
-        [div           div]
-        [mod           mod]
+        [quotient      quotient]
+        [remainder     remainder]
         [car           car]
         [cdr           cdr]
         [cons          cons]
@@ -1492,8 +1492,8 @@
                          `(* ,rand1 ,rand2))
                        `(sra ,rand2 ,shift-fixnum)))
                    rand1)])]
-        [(div ,[Value -> rand1] ,[Value -> rand2]) `(ash (div ,rand1 ,rand2) ,shift-fixnum)]
-        [(mod ,[Value -> rand1] ,[Value -> rand2]) `(mod ,rand1 ,rand2)]
+        [(quotient ,[Value -> rand1] ,[Value -> rand2]) `(ash (quotient ,rand1 ,rand2) ,shift-fixnum)]
+        [(remainder ,[Value -> rand1] ,[Value -> rand2]) `(remainder ,rand1 ,rand2)]
         [(car ,[Value -> pair]) `(mref ,pair ,offset-car)]
         [(cdr ,[Value -> pair]) `(mref ,pair ,offset-cdr)]
         [(char->integer ,[Value -> ch])
@@ -2581,8 +2581,8 @@
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
           [(set! rdx (sign-of rax)) e]
-          [(set! (rax rdx) (div (rax rdx) ,[(Triv map) -> y]))
-           `(set! (rax rdx) (div (rax rdx) ,y))]
+          [(set! (rax rdx) (quotient (rax rdx) ,[(Triv map) -> y]))
+           `(set! (rax rdx) (quotient (rax rdx) ,y))]
           [(set! ,[(Var map) -> v1] (,op ,[(Triv map) -> v2] ,[(Triv map) -> x]))
            `(set! ,v1 (,op ,v2 ,x))]
           [(set! ,[(Var map) -> var] ,[(Triv map) -> triv])
@@ -2601,14 +2601,14 @@
   Program)
 
 (define-who select-instructions
-  (define div/mod?
+  (define quotient/remainder?
     (lambda (x)
-      (or (eq? x 'div) (eq? x 'mod))))
-  (define div/mod->result-register
-    (lambda (div/mod)
-      (match div/mod
-        [div 'rax]
-        [mod 'rdx])))
+      (or (eq? x 'quotient) (eq? x 'remainder))))
+  (define quotient/remainder->result-register
+    (lambda (quotient/remainder)
+      (match quotient/remainder
+        [quotient 'rax]
+        [remainder 'rdx])))
   (define not-so-trivial?
     (lambda (x)
       (or (frame-var? x)
@@ -2741,35 +2741,35 @@
                      (values
                        (make-begin (cons `(set! ,temp ,base) (list eff)))
                        (cons temp u))))])]
-        [(set! ,v (,div/mod ,x ,y)) (guard (div/mod? div/mod) (or (label? y) (integer? y)))
+        [(set! ,v (,quotient/remainder ,x ,y)) (guard (quotient/remainder? quotient/remainder) (or (label? y) (integer? y)))
          (let ([t (unique-name 'u)])
-           (let-values ([(eff u) (Effect `(set! ,v (,div/mod ,x ,t)))])
+           (let-values ([(eff u) (Effect `(set! ,v (,quotient/remainder ,x ,t)))])
              (values
                (make-begin (cons `(set! ,t ,y) (list eff)))
                (cons t u))))]
-        [(set! rax (div rax ,y))
+        [(set! rax (quotient rax ,y))
          (values `(begin (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
-        [(set! rdx (mod rax ,y))
+                         (set! (rax rdx) (quotient (rax rdx) ,y))) '())]
+        [(set! rdx (remainder rax ,y))
          (values `(begin (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
-        [(set! rax (div ,x ,y))
+                         (set! (rax rdx) (quotient (rax rdx) ,y))) '())]
+        [(set! rax (quotient ,x ,y))
          (values `(begin (set! rax ,x)
                          (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
-        [(set! rdx (mod ,x ,y))
+                         (set! (rax rdx) (quotient (rax rdx) ,y))) '())]
+        [(set! rdx (remainder ,x ,y))
          (values `(begin (set! rax ,x)
                          (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))) '())]
-        [(set! ,v (,div/mod rax ,y)) (guard (div/mod? div/mod))
+                         (set! (rax rdx) (quotient (rax rdx) ,y))) '())]
+        [(set! ,v (,quotient/remainder rax ,y)) (guard (quotient/remainder? quotient/remainder))
          (values `(begin (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))
-                         (set! ,v ,(div/mod->result-register div/mod))) '())]
-        [(set! ,v (,div/mod ,x ,y)) (guard (div/mod? div/mod))
+                         (set! (rax rdx) (quotient (rax rdx) ,y))
+                         (set! ,v ,(quotient/remainder->result-register quotient/remainder))) '())]
+        [(set! ,v (,quotient/remainder ,x ,y)) (guard (quotient/remainder? quotient/remainder))
          (values `(begin (set! rax ,x)
                          (set! rdx (sign-of rax))
-                         (set! (rax rdx) (div (rax rdx) ,y))
-                         (set! ,v ,(div/mod->result-register div/mod))) '())]
+                         (set! (rax rdx) (quotient (rax rdx) ,y))
+                         (set! ,v ,(quotient/remainder->result-register quotient/remainder))) '())]
         [(set! ,v (,rator ,v ,x))
          (cond [(and (eq? rator '*) (frame-var? v))
                 (let ([temp (unique-name 'u)])
@@ -2937,7 +2937,7 @@
              (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
             [(set! rdx (sign-of rax))
              (set-cons 'rax (difference post '(rdx)))]
-            [(set! (rax rdx) (div (rax rdx) ,y))
+            [(set! (rax rdx) (quotient (rax rdx) ,y))
              (liveset-cons y (set-cons 'rdx (set-cons 'rax post)))]
             [(set! ,v (,rator ,x ,y))
              (let ([post-rhs (difference post (list v))])
@@ -3360,8 +3360,8 @@
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
           [(set! rdx (sign-of rax)) e]
-          [(set! (rax rdx) (div (rax rdx) ,[(Triv map) -> y]))
-           `(set! (rax rdx) (div (rax rdx) ,y))]
+          [(set! (rax rdx) (quotient (rax rdx) ,[(Triv map) -> y]))
+           `(set! (rax rdx) (quotient (rax rdx) ,y))]
           [(set! ,[(Var map) -> v1] (,op ,[(Triv map) -> v2] ,[(Triv map) -> x]))
            `(set! ,v1 (,op ,v2 ,x))]
           [(set! ,[(Var map) -> var] ,[(Triv map) -> triv])
@@ -3434,8 +3434,8 @@
           [(mset! ,[(Triv offset) -> base] ,[(Triv offset) -> off] ,[(Triv offset) -> expr])
            (values `(mset! ,base ,off ,expr) offset)]
           [(set! rdx (sign-of rax)) (values e offset)]
-          [(set! (rax rdx) (div (rax rdx) ,[(Triv offset) -> y]))
-           (values `(set! (rax rdx) (div (rax rdx) ,y)) offset)]
+          [(set! (rax rdx) (quotient (rax rdx) ,[(Triv offset) -> y]))
+           (values `(set! (rax rdx) (quotient (rax rdx) ,y)) offset)]
           [(set! ,[(Var offset) -> v1] (,op ,[(Triv offset)  -> v2] ,[(Triv offset) -> x]))
            (if (eq? v1 frame-pointer-register)
                (cond [(and (eq? op '+) (integer? x))
@@ -3951,7 +3951,7 @@
                 (emit 'movq (rand->x86-64-arg expr) (Label offset))]
                [else (Statement `(set! ,(BaseOffset base offset) ,expr))])]
         [(set! rdx (sign-of rax)) (emit 'cqto)]
-        [(set! (rax rdx) (div (rax rdx) ,y))
+        [(set! (rax rdx) (quotient (rax rdx) ,y))
          (emit 'idivq y)]
         [(set! ,v (mref ,base ,offset))
          (cond [(and (or (label? base) (string? base))
