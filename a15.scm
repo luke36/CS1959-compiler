@@ -259,7 +259,7 @@
                              ,(make-begin body*)
                              ,(convert-cond (cdr clause*) env))))])))
   (define convert-quasiquote
-    (lambda (qd env)
+    (lambda (qd env level)
       (define unchanged
         (lambda (qd expr)
           (and (pair? expr)
@@ -267,18 +267,22 @@
                (eq? qd (cadr expr)))))
       (cond [(and (pair? qd)
                   (eq? (car qd) 'unquote)
-                  (not (assq 'unquote env)))
+                  (not (assq 'unquote env))
+                  (= level 0))
              ((Expr env) (cadr qd))]
             [(pair? qd)
-             (let ([a (car qd)]
-                   [d (cdr qd)])
-               (let ([a^ (convert-quasiquote a env)]
-                     [d^ (convert-quasiquote d env)])
-                 (if (and (unchanged a a^) (unchanged d d^))
-                     `(quote ,qd)
-                     `(cons ,a^ ,d^))))]
+             (let* ([a (car qd)]
+                    [d (cdr qd)]
+                    [level^ (cond [(eq? a 'quasiquote) (add1 level)]
+                                  [(eq? a 'unquote) (sub1 level)]
+                                  [else level])]
+                    [a^ (convert-quasiquote a env level)]
+                    [d^ (convert-quasiquote d env level^)])
+               (if (and (unchanged a a^) (unchanged d d^))
+                   `(quote ,qd)
+                   `(cons ,a^ ,d^)))]
             [(vector? qd)
-             (let ([qd^ (vector-map (lambda (qd) (convert-quasiquote qd env)) qd)]
+             (let ([qd^ (vector-map (lambda (qd) (convert-quasiquote qd env level)) qd)]
                    [length (vector-length qd)])
                (if (let loop ([i 0])
                      (if (= i length)
@@ -324,7 +328,7 @@
           [(quote ,datum)
            (check-datum datum)
            `(quote ,datum)]
-          [(quasiquote ,quasidatum) (convert-quasiquote quasidatum env)]
+          [(quasiquote ,quasidatum) (convert-quasiquote quasidatum env 0)]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq])
            `(if ,cond ,conseq (void))]
           [(if ,[(Expr env) -> cond] ,[(Expr env) -> conseq] ,[(Expr env) -> alter])
@@ -4128,7 +4132,23 @@
     '.a
     'λ
     '\x00;
-    '\x5c;\x78;\x30;\x3b; ;\x0;
+    '\"
+    '\#
+    '\'
+    '\(
+    '\[
+    '\\
+    '\;
+    '\@
+    '\`
+    '\{
+    '\|
+    '\,
+    '\-1
+    '\+0
+    '\.0
+    '\00
+    '\x5c;\x78;\x30;\x3b; ; \x0;
     '(a 0 b 1 c 2)
     '(a a a b b b)
     (symbol? 'a)
@@ -4170,7 +4190,7 @@
     (caddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
     (cdadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
     (cddar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cdddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
     (cond [(= 1 2) '=]
           [(< 1 2) '<]
           [(> 1 2) '>])
@@ -4193,6 +4213,10 @@
       (quasiquote))
     (let ([unquote 'x])
       `(,x))
+    (let ([a 'A])
+      '',a)
+    (let ([a 'A])
+      '',,a)
 
     ;; Euclidean
     (letrec ([gcd

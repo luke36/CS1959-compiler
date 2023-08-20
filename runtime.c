@@ -261,34 +261,49 @@ typedef long ptr;
 #define CONTINUATIONSTACK(x) \
   ((ptr *)(UNTAG(x,tag_procedure) + disp_continuation_stack))
 #define SYMBOLLENGTH(addr) (*(long *)((char *)(addr) + disp_symbol_name_length))
-#define SYMBOLNAME(addr) (wchar_t *)((char *)(addr) + disp_symbol_name)
+#define SYMBOLNAME(addr) (ptr *)((char *)(addr) + disp_symbol_name)
 
 #define MAXDEPTH 100
 #define MAXLENGTH 1000
 
-static void print_symbol(wchar_t *str, long length) {
+static void print_identifier(ptr *str, long length) {
   wchar_t c;
   long i;
   for (i = 0; i < length; i++, str++) {
     c = *str;
-    if (c <= 32 || // unprintable or space
-        c == L'"' || // string
-        c == L'#' || // vector
-        c == L'\'' || // quote
-        c == L'(' || // list, etc
+    if (/* unprintable or space */
+        c <= 32 ||
+        /* string */
+        c == L'"' ||
+        /* comments */
+        c == L';' ||
+        /* other delimiters */
+        c == L'#' ||
+        c == L'(' ||
         c == L')' ||
         c == L'[' ||
         c == L']' ||
-        c == L';' || // comment
-        c == L'@' && i == 0 || // (why?)
-        c == L'`' || // quasiquote
-        c == L'{' || // (what's this)
+        c == L'{' ||
         c == L'}' ||
-        c == L'|' || // literal between | ... |
-        c == L',' || // unquote
-        c == L'-' && i == 0 && length != 1 || // numbers
+        /* escape character */
+        c == '\\' ||
+        /* escape between | ... | */
+        c == L'|' ||
+        /* quote */
+        c == L'\'' ||
+        /* quasiqupte */
+        c == L'`' ||
+        /* unquote */
+        c == L',' ||
+        /* numbers */
+        c == L'@' && i == 0 ||
+        /* exclude +, -,  ->... */
+        c == L'-' && i == 0 && length != 1 && (wchar_t)str[1] != L'>' ||
         c == L'+' && i == 0 && length != 1 ||
-        c == L'.' && i == 0 ||
+        /* exclude `...' */
+        c == L'.' && i == 0 && !(length == 3 &&
+                                 (wchar_t)str[1] == L'.' &&
+                                 (wchar_t)str[2] == L'.') ||
         L'0' <= c && c <= L'9' && i == 0
         )
       wprintf(L"\\x%x;", c);
@@ -361,7 +376,7 @@ static void print1(ptr x, int d) {
     wprintf(L"#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
     ptr *addr = SCHEME_SYMBOL_TO_ADDRESS(x);
-    print_symbol(SYMBOLNAME(addr), SYMBOLLENGTH(addr));
+    print_identifier(SYMBOLNAME(addr), SYMBOLLENGTH(addr));
   } else if (TAG(x, mask_char) == tag_char) {
     wchar_t c = CHAR(x);
     if (c <= 32)
