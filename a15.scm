@@ -1,4 +1,7 @@
-;; todo: use SCCs in purify-letrec; remove useless set!
+;; todo: * use SCCs in purify-letrec, and assimilate elsewhere;
+;;       * remove useless set!
+;;       * how to trace globals (more) precisely?
+;;         A: no you can't do so with minimal effort (live masks should work?)
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -12,12 +15,12 @@
 (load "a15-wrapper.scm")
 
 (define *standard* 'r6rs)
-(define *cp-1-enabled* #t)
+(define *cp-1-enabled* #t) ; better set to #f when testing trivial cases
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
-(define *optimize-global-enabled* #t)
-(define *max-inline-literal-size* 0)
+(define *optimize-global-enabled* #f) ; not encouraged
+(define *max-inline-literal-size* 5)
 (define *collection-enabled* #t)
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
@@ -249,7 +252,9 @@
                          [body* (map (Expr env) (cdr cls))])
                     (if (and (eq? cond 'else)
                              (not (assq 'else env)))
-                        (make-begin body*)
+                        (if (eq? (cdr clause*) '())
+                            (make-begin body*)
+                            (format-error who "misplaced aux keyword else"))
                         `(if ,((Expr env) cond)
                              ,(make-begin body*)
                              ,(convert-cond (cdr clause*) env))))])))
@@ -327,7 +332,10 @@
           [(and ,[(Expr env) -> rand*] ...) (convert-and rand*)]
           [(or ,[(Expr env) -> rand*] ...) (convert-or rand*)]
           [(not ,[(Expr env) -> rand]) `(if ,rand (quote #f) (quote #t))]
-          [(cond ,clause* ...) (convert-cond clause* env)]
+          [(cond ,clause* ...)
+           (if (<= (length clause*) 0)
+               (format-error who "invalid syntax ~s" x)
+               (convert-cond clause* env))]
           [(caar ,[(Expr env) -> expr]) `(car (car ,expr))]
           [(cadr ,[(Expr env) -> expr]) `(car (cdr ,expr))]
           [(cdar ,[(Expr env) -> expr]) `(cdr (car ,expr))]
@@ -375,7 +383,7 @@
           [,x (format-error who "invalid expression ~s" x)]))))
   (lambda (p) ((Expr '()) p)))
 
-(define-who proceduralize-primitive
+(define-who proceduralize-primitives
   (define bindings)
   (define Expr
     (lambda (e)
@@ -405,10 +413,75 @@
     (let ([p^ (Expr p)])
       (make-letrec (map cdr bindings) p^))))
 
+(define-who convert-complex-datum
+  (define bindings)
+  (define fillings)
+  (define size
+    (lambda (d)
+      (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
+            [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
+            [else 1])))
+  (define do-conversion
+    (lambda (const)
+      (cond
+        [(and (pair? const))
+         `(cons
+            ,(do-conversion (car const))
+            ,(do-conversion (cdr const)))]
+        [(vector? const)
+         (let* ([tmp (unique-name 'tmp)]
+                [length (vector-length const)]
+                [fill (let loop ([i 0])
+                        (cond [(< i length)
+                               (cons
+                                 `(vector-set! ,tmp (quote ,i) ,(do-conversion (vector-ref const i)))
+                                 (loop (add1 i)))]
+                              [else '()]))])
+           `(let ([,tmp (make-vector (quote ,length))])
+              ,(make-begin `(,@fill ,tmp))))]
+        [else `(quote ,const)])))
+  (define remove-last
+    (lambda (l)
+      (cond [(null? (cdr l)) '()]
+            [else (cons (car l) (remove-last (cdr l)))])))
+  (define Expr
+    (lambda (e)
+      (match e
+        [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
+        [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
+        [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
+        [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
+        [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
+        [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
+        [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
+        [(quote ,imm)
+         (if (and (or (pair? imm) (vector? imm)))
+             (if (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*))
+                 (let ([imm^ (do-conversion imm)])
+                   (cond [(and (pair? imm))
+                          (let ([tmp (unique-name 'complex)])
+                            (set! bindings (cons `(,tmp ,imm^) bindings))
+                            tmp)]
+                         [(vector? imm)
+                          (set! bindings (cons (caadr imm^) bindings))
+                          (set! fillings (append (remove-last (cdaddr imm^)) fillings))
+                          (caaadr imm^)]))
+                 (let ([tmp (unique-name 'complex)])
+                   (set! bindings (cons (list tmp (list 'quote imm)) bindings))
+                   tmp))
+             `(quote ,imm))]
+        [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
+        [,x (guard (uvar? x)) x]
+        [,lab (guard (label? lab)) lab])))
+  (lambda (p)
+    (set! bindings '())
+    (set! fillings '())
+    (make-let bindings
+      (make-begin `(,@fillings ,(Expr p))))))
+
 (define optimize-direct-call
   (lambda (e)
     (match e
-      [(with-global-data ,data (outmost ,out ,[e])) `(with-global-data ,data (outmost ,out ,e))]
       [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
       [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
       [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
@@ -505,9 +578,10 @@
                  (loop x* (cdr b*) as* simple* lambda* (cons b complex*))]
                 [(and (not (memq x as*)) (lambda? e))
                  (loop x* (cdr b*) as* simple* (cons b lambda*) complex*)]
-                [(and (not (eq? (car e) 'let))
-                      (not (eq? (car e) 'letrec))
-                      ((simple? x* #t no-effect?) e))
+                [(or (not (pair? e))
+                     (and (not (eq? (car e) 'let))
+                          (not (eq? (car e) 'letrec))
+                          ((simple? x* #t no-effect?) e)))
                  (loop x* (cdr b*) as* (cons b simple*) lambda* complex*)]
                 [else
                   (match e
@@ -518,7 +592,7 @@
                      (let-values ([(as*^^ simple*^ lambda*^ complex*^)
                                    (partition '() `([,x*^ ,e*^] ...) as*^
                                      (effect-free? body^) ; or lambda?
-                                     #t)])
+                                     (not (effect-free? body^)))])
                        (if (null? complex*^)
                            (loop (append x*^ x*) (cons (list x body^) (cdr b*))
                              (append as*^^ as*^ as*)
@@ -846,74 +920,6 @@
       [(outmost ,out ,[(Expr '() out) -> e])
        `(with-global-data ,(map cdr global-label)
           (outmost ,out ,e))])))
-
-(define-who convert-complex-datum
-  (define size
-    (lambda (d)
-      (cond [(pair? d) (add1 (+ (size (car d)) (size (cdr d))))]
-            [(vector? d) (add1 (apply + (vector->list (vector-map size d))))]
-            [else 1])))
-  (define bindings)
-  (define fillings)
-  (define do-conversion
-    (lambda (const)
-      (cond
-        [(and (pair? const))
-         `(cons
-            ,(do-conversion (car const))
-            ,(do-conversion (cdr const)))]
-        [(vector? const)
-         (let* ([tmp (unique-name 'tmp)]
-                [length (vector-length const)]
-                [fill (let loop ([i 0])
-                        (cond [(< i length)
-                               (cons
-                                 `(vector-set! ,tmp (quote ,i) ,(do-conversion (vector-ref const i)))
-                                 (loop (add1 i)))]
-                              [else '()]))])
-           `(let ([,tmp (make-vector (quote ,length))])
-              ,(make-begin `(,@fill ,tmp))))]
-        [else `(quote ,const)])))
-  (define remove-last
-    (lambda (l)
-      (cond [(null? (cdr l)) '()]
-            [else (cons (car l) (remove-last (cdr l)))])))
-  (define Expr
-    (lambda (e)
-      (match e
-        [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
-        [(begin ,[expr*] ... ,[expr]) `(begin ,expr* ... ,expr)]
-        [(let ([,uvar* ,[body*]] ...) ,[body]) `(let ([,uvar* ,body*] ...) ,body)]
-        [(letrec ([,uvar* ,[body*]] ...) ,[body]) `(letrec ([,uvar* ,body*] ...) ,body)]
-        [(set! ,uvar ,[expr]) `(set! ,uvar ,expr)]
-        [(lambda (,uvar* ...) ,[body]) `(lambda (,uvar* ...) ,body)]
-        [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-        [(quote ,imm)
-         (if (and (or (pair? imm) (vector? imm))
-                  (or (not *max-inline-literal-size*) (< (size imm) *max-inline-literal-size*)))
-             (let ([imm^ (do-conversion imm)])
-               (cond [(and (pair? imm))
-                      (let ([tmp (unique-name 'tmp)])
-                        (set! bindings (cons `(,tmp ,imm^) bindings))
-                        tmp)]
-                     [(vector? imm)
-                      (set! bindings (cons (caadr imm^) bindings))
-                      (set! fillings (append (remove-last (cdaddr imm^)) fillings))
-                      (caaadr imm^)]))
-             `(quote ,imm))]
-        [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
-        [,x (guard (uvar? x)) x]
-        [,lab (guard (label? lab)) lab])))
-  (lambda (p)
-    (set! bindings '())
-    (set! fillings '())
-    (match p
-      [(with-global-data ,data
-         (outmost ,out ,[Expr -> e]))
-       `(with-global-data ,data
-          (outmost ,out
-            ,(make-let bindings
-               (make-begin `(,fillings ... ,e)))))])))
 
 (define-who remove-anonymous-lambda
   (define let-rhs
@@ -1625,13 +1631,12 @@
             [(integer? i) (ash i shift-fixnum)]
             [(char? i) (+ (ash (char->integer i) shift-char) tag-char)]
             [else
-              (let ([complex (unique-label 'code)]
-                    [lab (unique-label 'literal)])
+              (let ([complex (unique-label 'code)])
                 (set! complex-datum-label*
                   (cons
-                    (list complex (specify-complex i) lab)
+                    (list complex (specify-complex i))
                     complex-datum-label*))
-                `(mref ,lab ,0))])))
+                `(,decode-literal-label ,complex))])))
   (lambda (p)
     (set! decode-literal-label (unique-label 'decode-literal-label))
     (set! current-dump-length 0)
@@ -1644,18 +1649,16 @@
              (letrec ([,label* (lambda (,uvar* ...) ,[Value -> body*])] ...)
                ,[Value -> body]))))
        (match complex-datum-label*
-         [([,complex* ,code* ,lab*] ...)
-          (let ([l* (map (lambda (v) decode-literal-label) lab*)])
-            `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
-                                ,alias* ...)
-               (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
-                                                  (reverse symbol->index))]
-                                  [,complex* (encode-literal (quote ,code*))] ...
-                                  [roots (,lab* ... ,glab* ...)])
-                 (with-closure-length ,closure-length
-                   (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
-                     (begin (mset! ,lab* 0 (,l* ,complex*)) ...
-                            ,body))))))])])))
+         [([,complex* ,code*] ...)
+          `(with-label-alias ([,decode-literal-label "_scheme_decode_literal"]
+                              ,alias* ...)
+             (with-global-data ([symbol-dump ,(map (lambda (x) (list 'quote (car x)))
+                                                (reverse symbol->index))]
+                                [,complex* (encode-literal (quote ,code*))] ...
+                                [roots (,glab* ...)])
+               (with-closure-length ,closure-length
+                 (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...)
+                   ,body))))])])))
 
 (define-who uncover-locals
   (define locals)
@@ -4054,7 +4057,8 @@
 
 (compiler-passes '(
   parse-scheme
-  proceduralize-primitive
+  proceduralize-primitives
+  convert-complex-datum
   optimize-direct-call
   uncover-assigned
   purify-letrec
@@ -4062,7 +4066,6 @@
   optimize-useless
   uncover-outmost
   convert-assignments
-  convert-complex-datum
   remove-anonymous-lambda
   sanitize-binding-forms
   uncover-free
@@ -4111,110 +4114,198 @@
 
 ;; special tests
 
-(define long `,(list 'quote tests))
+(define-who test-all-extra
+  (lambda arg*
+    (fluid-let ([tests tests-extra])
+      (apply test-all arg*))
+    (test-one `,(list 'quote tests))))
 
-(define normalizer
-  '(letrec
-       ([val
-          (letrec ([assq
-                     (lambda (x l)
-                       (if (null? l) #f
-                           (if (eq? (car (car l)) x)
-                               (car l)
-                               (assq x (cdr l)))))]
-                   [val1
-                     (lambda (e env)
-                       (cond [(symbol? e) (cdr (assq e env))]
-                             [(eq? (car e) 'quote) (cadr e)]
-                             [(eq? (car e) 'lambda)
-                              (lambda (arg)
-                                (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
-                             [else ((val1 (car e) env) (val1 (cadr e) env))]))])
-            (lambda (e) (val1 e '())))]
-        [read-back
-          (letrec ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
-                   [c 0]
-                   [created-neutral '()]
-                   [newvar
-                     (lambda ()
-                       (set! c (+ c 1))
-                       (letrec ([locate
-                                  (lambda (i l)
-                                    (if (eq? i 1)
-                                        (car l)
-                                        (locate (- i 1) (cdr l))))])
-                         (locate c uvars)))]
-                   [neutral?1
-                     (lambda (x l)
-                       (cond [(null? l) #f]
-                             [(eq? (caar l) x) (cdar l)]
-                             [else (neutral?1 x (cdr l))]))]
-                   [neutral?
-                     (lambda (x) (neutral?1 x created-neutral))]
-                   [create-neutral
-                     (lambda (e)
-                       (letrec ([ne (lambda (y)
-                                      (create-neutral (cons ne y)))])
-                         (set! created-neutral (cons (cons ne e) created-neutral))
-                         ne))])
-            (lambda (e)
-              (cond [(neutral? e)
-                     (let ([app (neutral? e)])
-                       (if (symbol? app) app
-                           (let ([rator (car app)]
-                                 [rand (cdr app)])
-                             `(,(read-back rator) ,(read-back rand)))))]
-                    [(procedure? e)
-                     (let ([v (newvar)])
-                       (let ([ne (create-neutral v)])
-                         `(lambda (,v) ,(read-back (e ne)))))]
-                    [else `',e])))]
-        [normalize (lambda (e) (read-back (val e)))])
-     (normalize '(((lambda (x) (lambda (y) (x y)))
-                   (lambda (x) (x x)))
-                  (lambda (x)
-                    (lambda (y) x))))))
+(define tests-extra
+  '('a
+    'xyz
+    '+a
+    '-a
+    '.a
+    'λ
+    '\x00;
+    '\x5c;\x78;\x30;\x3b; ;\x0;
+    '(a 0 b 1 c 2)
+    '(a a a b b b)
+    (symbol? 'a)
+    (symbol? 'λ)
+    (symbol? 1)
+    (symbol? '(a b c))
+    (eq? 'q 'r)
+    (eq? 't 't)
+    #\a
+    #\我
+    #\x00
+    #\;
+    '(#\a #\b a b)
+    (char? #\x)
+    (char? 'a)
+    (char? 42)
+    (char->integer #\!)
+    (integer->char 55)
+    (char=? #\0 #\1)
+    (char=? #\+ #\+)
+    (quotient 6 3)
+    (quotient 5 2)
+    (quotient -7 3)
+    (quotient -10 -4)
+    (quotient 9 -4)
+    (remainder 6 3)
+    (remainder 5 2)
+    (remainder -7 3)
+    (remainder -10 -4)
+    (remainder 9 -4)
+    (caar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cdar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (caaar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (caadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cadar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cdaar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (caddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cdadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cddar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
+    (cond [(= 1 2) '=]
+          [(< 1 2) '<]
+          [(> 1 2) '>])
+    (cond [else #t])
+    (cond [#t #f]
+          [else #t])
+    (cond [#f #f]
+          [else #t])
+    (let ([cond (lambda (x) x)])
+      (cond 0))
+    (let ([else #f])
+      (cond [else #t]))
+    `a
+    `(a b c)
+    (let ([a 'A])
+      `,a)
+    `(,(+ 1 2))
+    `(,(car `(,(cons 'x '(y z)) b c)))
+    (let ([quasiquote (lambda () 's)])
+      (quasiquote))
+    (let ([unquote 'x])
+      `(,x))
 
-(define yin-yang
-  '(begin
-     (display #\;)
-     (display #\space)
-     (let ([count 50])
-       (let ([yin
-               ((lambda (cc)
-                  (display '陰)
-                  (set! count (- count 1))
-                  (if (= count 0)
-                      (lambda (x) (display #\newline))
-                      cc))
-                (call/cc (lambda (c) c)))])
-         (let ([yang
-                 ((lambda (cc)
-                    (display '陽)
-                    (set! count (- count 1))
-                    (if (= count 0)
-                        (lambda (x) (display #\newline))
-                        cc))
-                  (call/cc (lambda (c) c)))])
-           (yin yang))))))
-
-(define debug-trace
-  '(letrec ([kk #f]
-            [fact
-              (lambda (n)
-                (cond [(<= n 0) (call/cc (lambda (k) (set! kk k) 1))]
-                      [else (* n (fact (- n 1)))]))])
-     (begin
-       (fact 10)
-       (inspect kk))))
-
-(define garbage
-  '(letrec ([malloc
-              (lambda (n)
-                (if (= 0 n)
-                    'success
-                    (let ([trash (make-vector 80000)])
-                      (vector-set! trash 0
-                        (malloc (- n 1))))))])
-     (malloc 5)))
+    ;; Euclidean
+    (letrec ([gcd
+               (lambda (x y)
+                 (cond [(> x y) (gcd y x)]
+                       [(= x 0) y]
+                       [else
+                         (gcd (remainder y x) x)]))])
+      `(,(gcd 423 84)
+        ,(gcd 1 832)
+        ,(gcd 0 7)
+        ,(gcd 7 0)
+        ,(gcd 7 7)
+        ,(gcd 36 32)))
+    ;; NbE
+    (letrec
+        ([val
+           (letrec ([assq
+                      (lambda (x l)
+                        (if (null? l) #f
+                            (if (eq? (car (car l)) x)
+                                (car l)
+                                (assq x (cdr l)))))]
+                    [val1
+                      (lambda (e env)
+                        (cond [(symbol? e) (cdr (assq e env))]
+                              [(eq? (car e) 'quote) (cadr e)]
+                              [(eq? (car e) 'lambda)
+                               (lambda (arg)
+                                 (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
+                              [else ((val1 (car e) env) (val1 (cadr e) env))]))])
+             (lambda (e) (val1 e '())))]
+         [read-back
+           (letrec ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
+                    [c 0]
+                    [created-neutral '()]
+                    [newvar
+                      (lambda ()
+                        (set! c (+ c 1))
+                        (letrec ([locate
+                                   (lambda (i l)
+                                     (if (eq? i 1)
+                                         (car l)
+                                         (locate (- i 1) (cdr l))))])
+                          (locate c uvars)))]
+                    [neutral?1
+                      (lambda (x l)
+                        (cond [(null? l) #f]
+                              [(eq? (caar l) x) (cdar l)]
+                              [else (neutral?1 x (cdr l))]))]
+                    [neutral?
+                      (lambda (x) (neutral?1 x created-neutral))]
+                    [create-neutral
+                      (lambda (e)
+                        (letrec ([ne (lambda (y)
+                                       (create-neutral (cons ne y)))])
+                          (set! created-neutral (cons (cons ne e) created-neutral))
+                          ne))])
+             (lambda (e)
+               (cond [(neutral? e)
+                      (let ([app (neutral? e)])
+                        (if (symbol? app) app
+                            (let ([rator (car app)]
+                                  [rand (cdr app)])
+                              `(,(read-back rator) ,(read-back rand)))))]
+                     [(procedure? e)
+                      (let ([v (newvar)])
+                        (let ([ne (create-neutral v)])
+                          `(lambda (,v) ,(read-back (e ne)))))]
+                     [else `',e])))]
+         [normalize (lambda (e) (read-back (val e)))])
+      (normalize '(((lambda (x) (lambda (y) (x y)))
+                    (lambda (x) (x x)))
+                   (lambda (x)
+                     (lambda (y) x)))))
+    ;; yin-yang
+    (begin
+      (display #\;)
+      (display #\space)
+      (let ([count 50])
+        (let ([yin
+                ((lambda (cc)
+                   (display '陰)
+                   (set! count (- count 1))
+                   (if (= count 0)
+                       (lambda (x) (display #\newline))
+                       cc))
+                 (call/cc (lambda (c) c)))])
+          (let ([yang
+                  ((lambda (cc)
+                     (display '陽)
+                     (set! count (- count 1))
+                     (if (= count 0)
+                         (lambda (x) (display #\newline))
+                         cc))
+                   (call/cc (lambda (c) c)))])
+            (yin yang)))))
+    ;; show frames
+    '(letrec ([kk #f]
+              [fact
+                (lambda (n)
+                  (cond [(<= n 0) (call/cc (lambda (k) (set! kk k) 1))]
+                        [else (* n (fact (- n 1)))]))])
+       (begin
+         (fact 10)
+         (inspect kk)))
+    ;; easy collection
+    (letrec ([malloc
+               (lambda (n)
+                 (if (= 0 n)
+                     'success
+                     (let ([trash (make-vector 80000)])
+                       (vector-set! trash 0
+                         (malloc (- n 1))))))])
+      (malloc 5))))
 

@@ -1,0 +1,3 @@
+[submodule "yscheme"]
+	path = yscheme
+	url = https://github.com/yinwang0/yscheme

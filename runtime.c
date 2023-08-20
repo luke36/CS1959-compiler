@@ -237,6 +237,8 @@ static void usage_error(char *who) {
 #define disp_continuation_return_address (8)
 #define disp_continuation_stack_size (16)
 #define disp_continuation_stack (24)
+#define disp_symbol_name_length (0)
+#define disp_symbol_name (8)
 
 typedef long ptr;
 
@@ -258,9 +260,42 @@ typedef long ptr;
   (*(long *)(UNTAG(x,tag_procedure) + disp_continuation_stack_size))
 #define CONTINUATIONSTACK(x) \
   ((ptr *)(UNTAG(x,tag_procedure) + disp_continuation_stack))
+#define SYMBOLLENGTH(addr) (*(long *)((char *)(addr) + disp_symbol_name_length))
+#define SYMBOLNAME(addr) (wchar_t *)((char *)(addr) + disp_symbol_name)
 
 #define MAXDEPTH 100
 #define MAXLENGTH 1000
+
+static void print_symbol(wchar_t *str, long length) {
+  wchar_t c;
+  long i;
+  for (i = 0; i < length; i++, str++) {
+    c = *str;
+    if (c <= 32 || // unprintable or space
+        c == L'"' || // string
+        c == L'#' || // vector
+        c == L'\'' || // quote
+        c == L'(' || // list, etc
+        c == L')' ||
+        c == L'[' ||
+        c == L']' ||
+        c == L';' || // comment
+        c == L'@' && i == 0 || // (why?)
+        c == L'`' || // quasiquote
+        c == L'{' || // (what's this)
+        c == L'}' ||
+        c == L'|' || // literal between | ... |
+        c == L',' || // unquote
+        c == L'-' && i == 0 && length != 1 || // numbers
+        c == L'+' && i == 0 && length != 1 ||
+        c == L'.' && i == 0 ||
+        L'0' <= c && c <= L'9' && i == 0
+        )
+      wprintf(L"\\x%x;", c);
+    else
+      wprintf(L"%C", c);
+  }
+}
 
 static void print1(ptr x, int d) {
   if (TAG(x, mask_fixnum) == tag_fixnum) {
@@ -326,17 +361,7 @@ static void print1(ptr x, int d) {
     wprintf(L"#<void>");
   } else if (TAG(x, mask_symbol) == tag_symbol) {
     ptr *addr = SCHEME_SYMBOL_TO_ADDRESS(x);
-    long len = *(addr++);
-    wchar_t c;
-    for (; len > 0; len--, addr++) {
-      c = *addr;
-      if (c <= 32)
-        wprintf(L"\\x%x;", c);
-      else if (c == L'\\')
-        wprintf(L"\\\\");
-      else
-        wprintf(L"%C", c);
-    }
+    print_symbol(SYMBOLNAME(addr), SYMBOLLENGTH(addr));
   } else if (TAG(x, mask_char) == tag_char) {
     wchar_t c = CHAR(x);
     if (c <= 32)

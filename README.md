@@ -2,7 +2,7 @@ Works with Chez Scheme 9.5. Framework is modified to work with chez 9 and r6rs.
 
 Beats yscheme in code length (but slower due to improper implementation of iterated register coalescing).
 
-Comparison:
+Comparison (change filename extension to run yscheme):
 
 ``` text
 ;; yscheme
@@ -43,13 +43,8 @@ Comparison:
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5818
-       average code length:  35.47560975609756
-(time (test-all-analyze))
-    62 collections
-    0.186370017s elapsed cpu time, including 0.003754762s collecting
-    0.186402211s elapsed real time, including 0.003896082s collecting
-    522822768 bytes allocated, including 521024016 bytes reclaimed
+       total code length:    5892
+       average code length:  35.926829268292686
 ```
 
 the best I can do is:
@@ -71,11 +66,11 @@ the best I can do is:
        average free var:        0.835820895522388
 
 ** code length report **
-       total code length:    5112
-       average code length:  31.170731707317074
+       total code length:    5137
+       average code length:  31.323170731707318
 ```
 
-but with extra runtime supports.
+but with extra runtime supports, and lift variables to global ones is not practical (in the presence of GC).
 
 ### additional features
 - `quotient`, `remainder`
