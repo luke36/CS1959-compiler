@@ -291,7 +291,7 @@ static void print_identifier(ptr *str, long length) {
         c == L'|' ||
         /* quote */
         c == L'\'' ||
-        /* quasiqupte */
+        /* quasiquote */
         c == L'`' ||
         /* unquote */
         c == L',' ||
@@ -502,7 +502,8 @@ static ptr *collect_one(ptr *p) {
     }
   } else if (TAG(x, mask_vector) == tag_vector) {
     long length = VECTORLENGTH(x);
-    if (TAG(length, mask_vector) == tag_vector) { // forwarded
+    /* forwarded? */
+    if (TAG(length, mask_vector) == tag_vector) {
       *p = length;
       return p + 1;
     } else {

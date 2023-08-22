@@ -1,4 +1,5 @@
 ;; todo: * use SCCs in purify-letrec, and assimilate elsewhere;
+;;       * in chez raw data are wrapped in a `raw' form; but here it's an overshot (dispite being `the right thing')
 ;;       * remove useless set!
 ;;       * how to trace globals (more) precisely?
 ;;         A: no you can't do so with minimal effort (live masks should work?)
@@ -4214,9 +4215,18 @@
     (let ([unquote 'x])
       `(,x))
     (let ([a 'A])
-      '',a)
+      ``,a)
     (let ([a 'A])
-      '',,a)
+      ``,,a)
+    `(a `(b ,(c ,(cons 1 2))))
+
+    ;; #t in chez but #f here
+    ;; in chez a continuation really is the stack
+    ;; (call/cc
+    ;;   (lambda (k1)
+    ;;     (call/cc
+    ;;       (lambda (k2)
+    ;;         (eq? k1 k2)))))
 
     ;; Euclidean
     (letrec ([gcd

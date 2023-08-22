@@ -70,7 +70,7 @@ the best I can do is:
        average code length:  31.323170731707318
 ```
 
-but with extra runtime supports, and lift variables to global ones is not practical (in the presence of GC).
+but with extra runtime supports, and lifting variables to global ones is not practical (in the presence of GC).
 
 ### additional features
 - `quotient`, `remainder`
@@ -79,7 +79,7 @@ but with extra runtime supports, and lift variables to global ones is not practi
 - symbols, `symbol?`
 - characters, `char?`, `char->integer`, `integer->char`, `char=?`
 - long list literals
-- `call/cc`
+- naieve `call/cc`
 - `inspect` a continuation (a.k.a the stack)
 - (hopefully correct) garbage collection
 
