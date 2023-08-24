@@ -573,7 +573,7 @@
 ;;; if the input name has the form of a unique name, it replaces the
 ;;; suffix ".nnn" with the suffix "$nnn", e.g., f.3 => f$3.  If the
 ;;; input name has the form of a unique label, the same label is
-;;; returned, i.e., unique-name is the identity function on unique
+;;; returned, i.e., unique-label is the identity function on unique
 ;;; labels.  If the input name is not in either form, a new suffix
 ;;; is generated, e.g., f => f$3.
 ;;;
