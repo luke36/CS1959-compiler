@@ -75,7 +75,7 @@ but with extra runtime supports, and lifting variables to global ones is not pra
 ### additional features
 - `quotient`, `remainder`
 - `display`, `write`, `read-char`
-- `cond`, `c[ad]+r`, `quasiquote`, `unquote`
+- `cond`, `quasiquote`, `unquote`
 - symbols, `symbol?`
 - characters, `char?`, `char->integer`, `integer->char`, `char=?`
 - long list literals

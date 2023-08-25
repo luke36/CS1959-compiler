@@ -211,6 +211,10 @@
   '(else unquote))
 (define aux-keyword?
   (lambda (x) (memq x aux-keywords)))
+(define syntax-keywords
+  '(quote quasiquote if and or not cond begin set! lambda let letrec))
+(define syntax-keyword?
+  (lambda (x) (memq x syntax-keywords)))
 
 (define-who parse-scheme
   (define check-bind-variable
@@ -321,6 +325,7 @@
       (lambda (var)
         (cond [(assq var env) => cdr]
               [(user-primitive? var) var]
+              [(syntax-keyword? var) (format-error who "invalid syntax ~s" var)]
               [(aux-keyword? var) (format-error who "misplaced aux keyword ~s" var)]
               [else (format-error who "variable ~s is not bound" var)]))))
   (define Expr
@@ -355,18 +360,6 @@
            (if (<= (length clause*) 0)
                (format-error who "invalid syntax ~s" x)
                (convert-cond clause* env))]
-          [(caar ,[(Expr env) -> expr]) `(car (car ,expr))]
-          [(cadr ,[(Expr env) -> expr]) `(car (cdr ,expr))]
-          [(cdar ,[(Expr env) -> expr]) `(cdr (car ,expr))]
-          [(cddr ,[(Expr env) -> expr]) `(cdr (cdr ,expr))]
-          [(caaar ,[(Expr env) -> expr]) `(car (car (car ,expr)))]
-          [(caadr ,[(Expr env) -> expr]) `(car (car (cdr ,expr)))]
-          [(cadar ,[(Expr env) -> expr]) `(car (cdr (car ,expr)))]
-          [(cdaar ,[(Expr env) -> expr]) `(cdr (car (car ,expr)))]
-          [(caddr ,[(Expr env) -> expr]) `(car (cdr (cdr ,expr)))]
-          [(cdadr ,[(Expr env) -> expr]) `(cdr (car (cdr ,expr)))]
-          [(cddar ,[(Expr env) -> expr]) `(cdr (cdr (car ,expr)))]
-          [(cdddr ,[(Expr env) -> expr]) `(cdr (cdr (cdr ,expr)))]
           [(begin ,[(Expr env) -> expr*] ... ,[(Expr env) -> expr])
            (make-begin `(,expr* ... ,expr))]
           [(set! ,var ,[(Expr env) -> expr])
@@ -376,7 +369,7 @@
                    (if (user-primitive? var)
                        (format-error who "attemp to assign immutable variable ~s" var)
                        (format-error who "variable ~s is not bound" var))
-                   `(set! ,var ,expr)))]
+                   `(set! ,((Var env) var) ,expr)))]
           [(lambda (,formal* ...) ,expr* ...)
            (if (<= (length expr*) 0) (format-error who "invalid syntax ~s" x)) ; can improve
            (check-parameter formal* x)
@@ -4069,7 +4062,7 @@
     '\+0
     '\.0
     '\00
-    '\x5c;\x78;\x30;\x3b; ; \x0;
+    '\\x0\;
     '(a 0 b 1 c 2)
     '(a a a b b b)
     (symbol? 'a)
@@ -4100,18 +4093,6 @@
     (remainder -7 3)
     (remainder -10 -4)
     (remainder 9 -4)
-    (caar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cdar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (caaar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (caadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cadar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cdaar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (caddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cdadr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cddar '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
-    (cdddr '(((1 2 3) 4) ((5 6) 7) (8 9) 10))
     (cond [(= 1 2) '=]
           [(< 1 2) '<]
           [(> 1 2) '>])
@@ -4173,11 +4154,13 @@
                     [val1
                       (lambda (e env)
                         (cond [(symbol? e) (cdr (assq e env))]
-                              [(eq? (car e) 'quote) (cadr e)]
+                              [(eq? (car e) 'quote) (car (cdr e))]
                               [(eq? (car e) 'lambda)
                                (lambda (arg)
-                                 (val1 (caddr e) (cons (cons (caadr e) arg) env)))]
-                              [else ((val1 (car e) env) (val1 (cadr e) env))]))])
+                                 (val1
+                                   (car (cdr (cdr e)))
+                                   (cons (cons (car (car (cdr e))) arg) env)))]
+                              [else ((val1 (car e) env) (val1 (car (cdr e)) env))]))])
              (lambda (e) (val1 e '())))]
          [read-back
            (letrec ([uvars '(a b c d e f g h i j k l m n o p q r s t u v w x y z)]
@@ -4195,7 +4178,7 @@
                     [neutral?1
                       (lambda (x l)
                         (cond [(null? l) #f]
-                              [(eq? (caar l) x) (cdar l)]
+                              [(eq? (car (car l)) x) (cdr (car l))]
                               [else (neutral?1 x (cdr l))]))]
                     [neutral?
                       (lambda (x) (neutral?1 x created-neutral))]
