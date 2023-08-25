@@ -207,6 +207,11 @@
 (define user-primitive->arity
   (lambda (x) (cdr (assq x user-primitive))))
 
+(define aux-keywords
+  '(else unquote))
+(define aux-keyword?
+  (lambda (x) (memq x aux-keywords)))
+
 (define-who parse-scheme
   (define check-bind-variable
     (lambda (var* e)
@@ -214,6 +219,13 @@
              (format-error who "invalid bound variable in ~s" e)]
             [(not (set? var*))
              (format-error who "duplicate bound variable in ~s" e)]
+            [else (void)])))
+  (define check-parameter
+    (lambda (var* e)
+      (cond [(not (for-all symbol? var*))
+             (format-error who "invalid parameter list in ~s" e)]
+            [(not (set? var*))
+             (format-error who "invalid parameter list in ~s" e)]
             [else (void)])))
   (define check-datum
     (lambda (d)
@@ -309,6 +321,7 @@
       (lambda (var)
         (cond [(assq var env) => cdr]
               [(user-primitive? var) var]
+              [(aux-keyword? var) (format-error who "misplaced aux keyword ~s" var)]
               [else (format-error who "variable ~s is not bound" var)]))))
   (define Expr
     (lambda (env)
@@ -359,10 +372,14 @@
           [(set! ,var ,[(Expr env) -> expr])
            (if (not (symbol? var))
                (format-error who "invalid syntax ~s" x)
-               `(set! ,((Var env) var) ,expr))]
+               (if (not (assq var env))
+                   (if (user-primitive? var)
+                       (format-error who "attemp to assign immutable variable ~s" var)
+                       (format-error who "variable ~s is not bound" var))
+                   `(set! ,var ,expr)))]
           [(lambda (,formal* ...) ,expr* ...)
            (if (<= (length expr*) 0) (format-error who "invalid syntax ~s" x)) ; can improve
-           (check-bind-variable formal* x)
+           (check-parameter formal* x)
            (let* ([uvar* (map unique-name formal*)]
                   [env^ (append (map cons formal* uvar*) env)]
                   [body* (map (Expr env^) expr*)])
@@ -1739,7 +1756,7 @@
         [(mset! ,[Value ->] ,[Value ->] ,[Value ->]) (values)]
         [(,[Value ->] ,[Value ->] ...) (values)]
         [(nop) (values)])))
-  (define Value                        ; in fact here Value is identical to Tail
+  (define Value ; in fact here Value is identical to Tail
     (lambda (v)
       (match v
         [(let ([,uvar* ,[Value ->]] ...) ,[Value ->])
