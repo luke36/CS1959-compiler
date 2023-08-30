@@ -1147,7 +1147,7 @@
                      (loop (cdr c*) wk-c (cons cls esc-c) (remq (car cls) wk-v) #f)]
                     [else (loop (cdr c*) (cons cls wk-c) esc-c wk-v same)]))))))
   (define Expr
-    (lambda (wk-uvar wk-lab)
+    (lambda (wk-uvar)
       (lambda (e)
         (match e
           [(letrec ([,lab* ,lam*] ...)
@@ -1156,8 +1156,7 @@
            (let*-values ([(wk-cls* oth-cls*0 wk-uvar^)
                           (partition cls* '() (append wk* wk-uvar))]
                          [(wk-lab^)
-                          (append (map (lambda (cls) (cadr cls)) wk-cls*)
-                            wk-lab)]
+                          (map (lambda (cls) (cadr cls)) wk-cls*)]
                          [(oth-cls*)
                           (map (lambda (cls)
                                  (cons (car cls)
@@ -1167,7 +1166,8 @@
                          [(lam*^) (map (Lambda wk-uvar^ wk-lab^) lab* lam*)])
              `(letrec ([,lab* ,lam*^] ...)
                 (closures (,oth-cls* ...)
-                  ,((Expr wk-uvar^ wk-lab^) body))))]
+                  (well-known ,(difference wk* wk-uvar^)
+                    ,((Expr wk-uvar^) body)))))]
           [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
           [(begin ,[e*] ... ,[e]) `(begin ,e* ... ,e)]
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
@@ -1175,7 +1175,7 @@
            `(,prim ,rand* ...)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,cp ,[arg*] ...)
-           (if (memq proc wk-lab)
+           (if (memq cp wk-uvar)
                `(,proc ,arg* ...)
                `(,proc ,cp ,arg* ...))]
           [,x (guard (uvar? x)) x]
@@ -1195,11 +1195,11 @@
                             (difference fv* wk-uvar)))])
              `(lambda (,fml*^ ...)
                 (bind-free (,bd* ...)
-                  ,((Expr wk-uvar wk-lab) body))))]))))
+                  ,((Expr wk-uvar) body))))]))))
   (lambda (p)
     (if *closure-optimization-enabled*
         (match p
-          [(with-global-data ,data ,[(Expr '() '()) -> e])
+          [(with-global-data ,data ,[(Expr '()) -> e])
            `(with-global-data ,data ,e)])
         p)))
 
@@ -1210,7 +1210,7 @@
         (match expr
           [(letrec ([,lab* ,lam*] ...)
              (closures ([,f* ,code* ,[fv**] ...] ...)
-               ,[body]))
+               (well-known ,wk* ,[body])))
            (let* ([lab->self `((,code* . ,f*) ...)]
                   [fv**^ (map (lambda (f fv*) (remq f fv*)) f* fv**)]
                   [lam*^ (map (lambda (lab lam)
@@ -1220,7 +1220,7 @@
                            lab* lam*)])
              `(letrec ([,lab* ,lam*^] ...)
                 (closures ([,f* ,code* ,fv**^ ...] ...)
-                  ,body)))]
+                  (well-known ,wk* ,body))))]
           [(if ,[cond] ,[conseq] ,[alter]) `(if ,cond ,conseq ,alter)]
           [(begin ,[e*] ... ,[e]) `(begin ,e* ... ,e)]
           [(let ([,x* ,[e*]] ...) ,[body]) `(let ([,x* ,e*] ...) ,body)]
@@ -1262,54 +1262,87 @@
               [(eq? (car fv) x) i]
               [else (loop (cdr fv) (add1 i))]))))
   (define Lambda
-    (lambda (l)
-      (match l
-        [(lambda (,formal* ...)
-           (bind-free (,cp ,fv* ...) ,body))
-         `(lambda (,formal* ...) ,((Expr cp fv*) body))])))
+    (lambda (wk-lab*)
+      (lambda (lab l)
+        (match l
+          [(lambda (,formal* ...)
+             (bind-free (,cp ,fv* ...) ,body))
+           `(lambda (,formal* ...) ,((Expr cp fv* (memq lab wk-lab*)) body))]))))
   (define Closure
-    (lambda (cp fvs)
+    (lambda (cp fvs wk? wk*)
       (lambda (c)
         (match c
-          [(,uvar ,lab ,[(Expr cp fvs) -> fv*] ...)
-           (set! closure-length (cons (list lab (ash (length fv*) align-shift)) closure-length))
-           (let ([set-free (let loop ([fv fv*] [i 0])
-                             (cond [(null? fv) '()]
-                                   [else (cons `(procedure-set! ,uvar (quote ,i) ,(car fv))
-                                           (loop (cdr fv) (add1 i)))]))])
-             (values `(,uvar (make-procedure ,lab (quote ,(length fv*))))
-               (if (null? set-free) '(void) `(begin ,@set-free))))]))))
+          [(,uvar ,lab ,[(Expr cp fvs wk?) -> fv*] ...)
+           (cond
+             [(and (eq? (length fv*) 1) (memq uvar wk*))
+              (values
+                '()
+                '(void)
+                uvar lab
+                `((,uvar ,(car fv*))))]
+             [(and (eq? (length fv*) 2) (memq uvar wk*))
+              (values
+                `((,uvar (cons (void) (void))))
+                `(begin
+                   (set-car! ,uvar ,(car fv*))
+                   (set-cdr! ,uvar ,(cadr fv*)))
+                uvar lab '())]
+             [else
+               (set! closure-length (cons (list lab (ash (length fv*) align-shift)) closure-length))
+               (let ([set-free (let loop ([fv fv*] [i 0])
+                                 (cond [(null? fv) '()]
+                                       [else (cons `(procedure-set! ,uvar (quote ,i) ,(car fv))
+                                               (loop (cdr fv) (add1 i)))]))])
+                 (values
+                   `((,uvar (make-procedure ,lab (quote ,(length fv*)))))
+                   (if (null? set-free) '(void) `(begin ,@set-free))
+                   uvar lab '()))])]))))
   (define Expr
-    (lambda (cp fvs)
+    (lambda (cp fvs wk?)
       (lambda (e)
         (match e
-          [(if ,[(Expr cp fvs) -> cond] ,[(Expr cp fvs) -> conseq] ,[(Expr cp fvs) -> alter])
+          [(if ,[(Expr cp fvs wk?) -> cond] ,[(Expr cp fvs wk?) -> conseq] ,[(Expr cp fvs wk?) -> alter])
            `(if ,cond ,conseq ,alter)]
-          [(begin ,[(Expr cp fvs) -> expr*] ... ,[(Expr cp fvs) -> expr])
+          [(begin ,[(Expr cp fvs wk?) -> expr*] ... ,[(Expr cp fvs wk?) -> expr])
            `(begin ,expr* ... ,expr)]
-          [(let ([,uvar* ,[(Expr cp fvs) -> body*]] ...) ,[(Expr cp fvs) -> body])
+          [(let ([,uvar* ,[(Expr cp fvs wk?) -> body*]] ...) ,[(Expr cp fvs wk?) -> body])
            `(let ([,uvar* ,body*] ...) ,body)]
-          [(letrec ([,lab* ,[Lambda -> lambda*]] ...)
-             (closures (,[(Closure cp fvs) -> bind* fill*] ...) ,[(Expr cp fvs) -> body]))
-           `(letrec ([,lab* ,lambda*] ...)
-              ,(make-let bind*
-                 (make-begin `(,fill* ... ,body))))]
-          [(,prim ,[(Expr cp fvs) -> rand*] ...) (guard (primitive? prim))
+          [(letrec ([,lab* ,lambda*] ...)
+             (closures (,[(Closure cp fvs wk? wk*) -> bind** fill* uv* lb* single**] ...)
+               (well-known (,wk* ...)
+                 ,[(Expr cp fvs wk?) -> body])))
+           (let ([wk-lab (let loop ([uv* uv*] [lb* lb*])
+                           (cond [(null? uv*) '()]
+                                 [(memq (car uv*) wk*)
+                                  (cons (car lb*) (loop (cdr uv*) (cdr lb*)))]
+                                 [else (loop (cdr uv*) (cdr lb*))]))])
+             `(letrec ([,lab* ,(map (Lambda wk-lab) lab* lambda*)] ...)
+                ,(make-let (apply append bind**)
+                   (make-let (apply append single**)
+                     (make-begin `(,fill* ... ,body))))))]
+          [(,prim ,[(Expr cp fvs wk?) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
           [(quote ,imm) e]
-          [(,[(Expr cp fvs) -> proc] ,[(Expr cp fvs) -> arg*] ...)
+          [(,[(Expr cp fvs wk?) -> proc] ,[(Expr cp fvs wk?) -> arg*] ...)
            (if (label? proc)            ; in the presence of optimize-known-call
                `(,proc ,arg* ...)
                `((procedure-code ,proc) ,arg* ...))]
           [,x (guard (uvar? x))
-            (cond [(index-of x fvs) =>
-                   (lambda (i) `(procedure-ref ,cp (quote ,i)))]
-                  [else x])]
+            (cond
+              [(and wk? (eq? (length fvs) 1) (eq? x (car fvs)))
+               cp]
+              [(and wk? (eq? (length fvs) 2) (eq? x (car fvs)))
+               `(car ,cp)]
+              [(and wk? (eq? (length fvs) 2) (eq? x (cadr fvs)))
+               `(cdr ,cp)]
+              [(index-of x fvs) =>
+               (lambda (i) `(procedure-ref ,cp (quote ,i)))]
+              [else x])]
           [,lab (guard (label? lab)) lab]))))
   (lambda (x)
     (set! closure-length '())
     (match x
-      [(with-global-data ,data ,[(Expr #f '()) -> e])
+      [(with-global-data ,data ,[(Expr #f '() #f) -> e])
        `(with-closure-length ,closure-length
           (with-global-data ,data ,e))])))
 
@@ -3646,7 +3679,8 @@
         [(let ([,lhs* ,[s**]] ...) ,[s*]) (apply append s* s**)]
         [(letrec ([,llabel* ,[Lambda -> s**]] ...)
            (closures ([,name* ,clabel* ,free** ...] ...)
-             ,[s*]))
+             (well-known ,wk*
+               ,[s*])))
          (apply append (map length free**) s* s**)]
         [(,prim ,[s**] ...)
          (guard (primitive? prim))
