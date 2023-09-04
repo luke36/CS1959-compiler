@@ -23,10 +23,8 @@
 #endif
 
 #define SCHEME_EXIT _scheme_exit
-#define SCHEME_ROOTS _scheme_roots
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
-extern long SCHEME_ROOTS;
 extern long SCHEME_ENTRY(char *, char *, char *);
 extern void SCHEME_EXIT(void);
 extern long *SCHEME_SYMBOL_TO_ADDRESS(long);
@@ -471,7 +469,6 @@ ptr display_ptr(ptr x) {
 }
 
 /* GC */
-#define SCHEME_ROOTS _scheme_roots
 #define disp_root_length (0)
 #define disp_root_roots (8)
 
@@ -644,10 +641,6 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
   alloc_ptr = new_heap;
   ptr *scan_ptr = new_heap;
 
-  long length = ROOTLENGTH(SCHEME_ROOTS);
-  ptr *roots = ROOTROOTS(SCHEME_ROOTS);
-  for (int i = 0; i < UNFIX(length); i++)
-    collect_one(roots + i);
   collect_stack(ra, top);
   while (scan_ptr < alloc_ptr)
     scan_ptr = collect_one(scan_ptr);

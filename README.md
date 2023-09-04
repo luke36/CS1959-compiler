@@ -31,7 +31,6 @@ Comparison (change filename extension to run yscheme):
         scheme standard:               r5rs
         garbage collection:            No
         encode large literals:         No
-        optimize globals:              No
         iterated register coalescing:  Yes
         closure optimization:          Yes
         pre-optimization:              Yes
@@ -43,34 +42,14 @@ Comparison (change filename extension to run yscheme):
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5892
-       average code length:  35.926829268292686
+       total code length:    5744
+       average code length:  35.02439024390244
+(time (test-all-analyze))
+    65 collections
+    0.210114854s elapsed cpu time, including 0.005291485s collecting
+    0.210109956s elapsed real time, including 0.005462918s collecting
+    538650976 bytes allocated, including 545938400 bytes reclaimed
 ```
-
-the best I can do is:
-
-``` text
-** Options **
-        scheme standard:               r6rs
-        garbage collection:            No
-        encode large literals:         Above 0
-        optimize globals:              Yes
-        iterated register coalescing:  Yes
-        closure optimization:          Yes
-        pre-optimization:              Yes
-        optimize jumps:                Yes
-
-** closure analysis report **
-       total closures created:  67
-       total free var:          56
-       average free var:        0.835820895522388
-
-** code length report **
-       total code length:    5137
-       average code length:  31.323170731707318
-```
-
-but with extra runtime supports, and lifting variables to global ones is not practical (in the presence of GC).
 
 ### additional features
 - `quotient`, `remainder`
