@@ -469,9 +469,6 @@ ptr display_ptr(ptr x) {
 }
 
 /* GC */
-#define disp_root_length (0)
-#define disp_root_roots (8)
-
 static ptr *new_heap;
 static ptr *new_heap_end;
 static ptr *alloc_ptr;
@@ -581,9 +578,6 @@ static void collect_stack(void *ra, ptr *top) {
   }
 }
 
-#define ROOTLENGTH(x) (*(long *)((long)(&(x)) + disp_root_length))
-#define ROOTROOTS(x) ((ptr *)((long)(&(x)) + disp_root_roots))
-
 static void free_area(char *addr, long n) {
   munmap(addr - pagesize, n + 2 * pagesize);
 }
@@ -625,7 +619,7 @@ static void guard_area(char *addr, long n) {
   }
 }
 
-long next_heapsize(long n, long extra) {
+static long next_heapsize(long n, long extra) {
   long m;
 
   m = n + extra;

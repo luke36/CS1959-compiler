@@ -24,7 +24,6 @@
 (define *collection-enabled* #t)
 (define *max-conservative-range* #f) ; may ask for more space than actually needed
 
-(define disp-root-globals 0)
 (set! allocation-pointer-register 'r11) ; leave rdx for division
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
@@ -854,7 +853,6 @@
                 ,(make-let `([,as* (cons ,new-t* (void))] ...)
                    ((Expr (append as* assigned)) expr))))]
           [(,prim ,[rand*] ...) (guard (primitive? prim)) `(,prim ,rand* ...)]
-          [(call/cc ,[expr]) `(call/cc ,expr)]
           [(quote ,imm) `(quote ,imm)]
           [(,[proc] ,[arg*] ...) `(,proc ,arg* ...)]
           [,x (guard (uvar? x)) (if (memq x assigned) `(car ,x) x)]))))
@@ -948,7 +946,6 @@
               (closures ([,uvar* ,lab* ,fv** ...] ...) ,body)))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim))
          `(,prim ,rand* ...)]
-        [(call/cc ,[Expr -> expr]) `(call/cc ,expr)]
         [(quote ,imm) e]
         [(,[Expr -> proc] ,[Expr -> arg*] ...)
          (if (uvar? proc)
@@ -3545,7 +3542,6 @@
   (define Expr
     (lambda (x)
       (match x
-        [(with-global-data ,data ,[e]) e]
         [,label (guard (label? label)) '()]
         [,uvar (guard (uvar? uvar)) '()]
         [(quote ,imm) '()]
@@ -3927,6 +3923,58 @@
 
 (trusted-passes #t)
 
+#;
+(define-who compile-one
+  (define run-compile
+    (lambda (input-expr passes)
+      (let run ([input-expr input-expr]
+                [passes passes]
+                [continue #f]
+                [break #f])
+        (unless (null? passes)
+          (match (car passes)
+            [(break when ,pred)
+             (if (pred input-expr)
+                 (break input-expr)
+                 (run input-expr (cdr passes) continue break))]
+            [(iterate ,ipass* ...)
+             (let next-iter ([input-expr input-expr])
+               (run input-expr
+                 ipass*
+                 (lambda (input-expr)
+                   (next-iter input-expr))
+                 (lambda (input-expr)
+                   (run input-expr (cdr passes) continue break))))]
+            [,pass-name
+              (guard (procedure? pass-name))
+              (run (pass-name input-expr) (cdr passes) continue break)])))))
+  (define-who eval-cp
+    (define eval-one
+      (lambda (pass)
+        (match pass
+          [(break when ,[pred]) `(break when ,pred)]
+          [(break unless ,[pred]) `(break unless ,pred)]
+          [(iterate ,[ipass*] ...) `(iterate ,ipass* ...)]
+          [,pass-name (guard (symbol? pass-name))
+            (eval pass-name)])))
+    (lambda (x)
+      (map eval-one x)))
+  (lambda (expr)
+    (with-output-to-file "t.s"
+      (lambda ()
+        (unique-name-count 0)
+        (run-compile expr (eval-cp (compiler-passes))))
+      'replace)))
+
+#;
+(if (not (null? (cdr (command-line))))
+    (begin
+      (compile-one
+        (read
+          (open-input-file
+            (cadr (command-line)))))
+      (system (format "gcc -m64 -o ~a runtime.c helper.s ~a" "t" "t.s"))))
+
 ;; special tests
 
 (define-who test-all-extra
@@ -4142,4 +4190,3 @@
                        (vector-set! trash 0
                          (malloc (- n 1))))))])
       (malloc 5))))
-
