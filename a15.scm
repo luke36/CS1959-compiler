@@ -1,5 +1,5 @@
 ;; todo: * use SCCs in purify-letrec, and assimilate elsewhere;
-;;       * in chez raw data are wrapped in a `raw' form; but here it's an overshot (dispite being `the right thing')
+;;       * in chez raw data are wrapped in a `raw' form; but here it's an overkill
 ;;       * remove useless set!
 ;;       * how to trace globals (more) precisely?
 ;;         A: no you can't do so with minimal effort (live masks should work?)
@@ -247,14 +247,14 @@
             [else (format-error who "invalid datum ~s" d)])))
   (define convert-and
     (lambda (rand*)
-      (cond [(null? rand*) #t]
+      (cond [(null? rand*) '(quote #t)]
             [(null? (cdr rand*)) (car rand*)]
             [else `(if ,(car rand*)
                        ,(convert-and (cdr rand*))
                        (quote #f))])))
   (define convert-or
     (lambda (rand*)
-      (cond [(null? rand*) #f]
+      (cond [(null? rand*) '(quote #f)]
             [(null? (cdr rand*)) (car rand*)]
             [else (let ([tmp (unique-name 'tmp)])
                     `(let ([,tmp ,(car rand*)])
@@ -4190,3 +4190,133 @@
                        (vector-set! trash 0
                          (malloc (- n 1))))))])
       (malloc 5))))
+
+(define fake-interpreter
+  '(letrec
+       ([extend (lambda (x v e) (cons (cons x v) e))]
+        [extend*
+          (lambda (xs vs e)
+            (if (null? xs) e
+                (extend* (cdr xs) (cdr vs)
+                  (extend (car xs) (car vs) e))))]
+        [map
+          (lambda (f l)
+            (if (null? l) '()
+                (cons (f (car l)) (map f (cdr l)))))]
+        [find
+          (lambda (x e)
+            (cond [(null? e) #f]
+                  [(eq? (car (car e)) x) (cdr (car e))]
+                  [else (find x (cdr e))]))]
+        [apply
+          (lambda (clos vs)
+            (if (eq? (car clos) 'lambda)
+                ;; (xs env . e)
+                (let ([xs (car (cdr clos))]
+                      [env (car (cdr (cdr clos)))]
+                      [e (cdr (cdr (cdr clos)))])
+                  (eval1 e (extend* xs vs env)))
+                ;; letrec bundle
+                ;; (x ((x-1 . f-1) ... (x-n . f-n)) . env)
+                (let ([x (car (cdr clos))]
+                      [x-f* (car (cdr (cdr clos)))]
+                      [env (cdr (cdr (cdr clos)))])
+                  (let ([f (find x x-f*)]
+                        [env^ (extend*
+                                (map (lambda (x-f) (car x-f)) x-f*)
+                                (map (lambda (x-f) (cons 'letrec (cons (car x-f) (cons x-f* env)))) x-f*)
+                                env)])
+                    (let ([xs (car (cdr f))]
+                          [e (car (cdr (cdr f)))])
+                      (eval1 e (extend* xs vs env^)))))))]
+        [eval1*
+          (lambda (es env)
+            (if (null? es) '()
+                (cons (eval1 (car es) env) (eval1* (cdr es) env))))]
+        [eval-binary-operator
+          (lambda (rator)
+            (cond
+              [(eq? rator '*) (lambda (x y) (* x y))]
+              [(eq? rator '+) (lambda (x y) (+ x y))]
+              [(eq? rator '-) (lambda (x y) (- x y))]
+              [(eq? rator '<) (lambda (x y) (< x y))]
+              [(eq? rator '<=) (lambda (x y) (<= x y))]
+              [(eq? rator '=) (lambda (x y) (= x y))]
+              [(eq? rator '>) (lambda (x y) (> x y))]
+              [(eq? rator '>=) (lambda (x y) (>= x y))]
+              [(eq? rator 'eq?) (lambda (x y) (eq? x y))]
+              [(eq? rator 'cons) (lambda (x y) (cons x y))]
+              [else #f]))]
+        [eval-unary-operator
+          (lambda (rator)
+            (cond
+              [(eq? rator 'boolean?) (lambda (x) (boolean? x))]
+              [(eq? rator 'fixnum?) (lambda (x) (fixnum? x))]
+              [(eq? rator 'null?) (lambda (x) (null? x))]
+              [(eq? rator 'pair?) (lambda (x) (pair? x))]
+              [(eq? rator 'procedure?) (lambda (x) (procedure? x))]
+              [(eq? rator 'car) (lambda (x) (car x))]
+              [(eq? rator 'cdr) (lambda (x) (cdr x))]
+              [(eq? rator 'symbol?) (lambda (x) (symbol? x))]
+              [else #f]))]
+        [eval1
+          (lambda (e env)
+            (cond
+              [(fixnum? e) e]
+              [(boolean? e) e]
+              [(symbol? e) (find e env)]
+              [(eq? (car e) 'quote) (car (cdr e))]
+              [(eq? (car e) 'if)
+               (if (eval1 (car (cdr e)) env)
+                   (eval1 (car (cdr (cdr e))) env)
+                   (eval1 (car (cdr (cdr (cdr e)))) env))]
+              [(eq? (car e) 'lambda)
+               (cons 'lambda
+                 (cons (car (cdr e))
+                   (cons env (car (cdr (cdr e))))))]
+              [(eq? (car e) 'let)
+               (let ([x-e* (car (cdr e))])
+                 (let ([e* (map (lambda (x-e) (car (cdr x-e))) x-e*)])
+                   (let ([v* (eval1* e* env)])
+                     (eval1 (car (cdr (cdr e)))
+                       (extend*
+                         (map (lambda (x-e) (car x-e)) x-e*)
+                         v*
+                         env)))))]
+              [(eq? (car e) 'letrec)
+               (let ([x--f* (car (cdr e))])
+                 (let ([x-f* (map (lambda (x--f) (cons (car x--f) (car (cdr x--f)))) x--f*)]
+                       [x* (map (lambda (x--f) (car x--f)) x--f*)])
+                   (eval1 (car (cdr (cdr e)))
+                     (extend*
+                       x*
+                       (map (lambda (x) (cons 'letrec (cons x (cons x-f* env)))) x*)
+                       env))))]
+              [(eval-binary-operator (car e))
+               ((eval-binary-operator (car e))
+                (eval1 (car (cdr e)) env)
+                (eval1 (car (cdr (cdr e))) env))]
+              [(eval-unary-operator (car e))
+               ((eval-unary-operator (car e))
+                (eval1 (car (cdr e)) env))]
+              [else (apply (eval1 (car e) env) (eval1* (cdr e) env))]))])
+     (lambda (e) (eval1 e '()))))
+
+(define test-interpreter
+  `(let ([eval ,fake-interpreter]
+         [quote-eval (quote ,(parse-scheme fake-interpreter))])
+     (letrec ((deep (lambda (n)
+                      (if (<= n 0)
+                          '(letrec ((fac (lambda (n)
+                                           (if (<= n 0)
+                                               1
+                                               (* n (fac (- n 1)))))))
+                             (fac 10))
+                          (cons
+                            quote-eval
+                            (cons
+                              (cons
+                                'quote
+                                (cons (deep (- n 1)) '()))
+                              '()))))))
+       (eval (deep 3)))))
