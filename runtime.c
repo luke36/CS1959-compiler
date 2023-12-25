@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* mremap */
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -12,7 +16,8 @@
 #include <locale.h>
 
 #define stack_size 100000
-/* set this to 1 to stress the GC */
+
+/* decrease this to stress the GC */
 #define heap_size 100000
 
 #ifdef __APPLE__
@@ -48,6 +53,8 @@ static char *heap_end;
 static char *stack;
 static long heapsize;
 static long stacksize;
+
+/* long gc_time; */
 
 int main(int argc, char *argv[]) {
   struct sigaction action;
@@ -121,6 +128,8 @@ int main(int argc, char *argv[]) {
  /* run the Scheme program and print the result */
   print(SCHEME_ENTRY(stack, heap, heap + heapsize));
   wprintf(L"\n");
+
+  /* fprintf(stderr, ";; GC time = %f s", (double)gc_time / 1e9); */
 
   return 0;
 }
@@ -480,9 +489,7 @@ static void collect_stack(void *ra, ptr *top);
 
 static ptr *collect_one(ptr *p) {
   ptr x = *p;
-  if (TAG(x, mask_fixnum) == tag_fixnum) {
-    return p + 1;
-  } else if (TAG(x, mask_pair) == tag_pair) {
+  if (TAG(x, mask_pair) == tag_pair) {
     ptr car = CAR(x);
     if (TAG(car, mask_pair) == tag_pair &&
         FORWARDED(UNTAG(car, tag_pair))) {
@@ -494,20 +501,10 @@ static ptr *collect_one(ptr *p) {
       *(alloc_ptr++) = CDR(x);
       return p + 1;
     }
-  } else if (TAG(x, mask_vector) == tag_vector) {
-    long length = VECTORLENGTH(x);
-    /* forwarded? */
-    if (TAG(length, mask_vector) == tag_vector) {
-      *p = length;
-      return p + 1;
-    } else {
-      *p = VECTORLENGTH(x) = DOTAG(alloc_ptr, tag_vector);
-      ptr *data = VECTORDATA(x);
-      *(alloc_ptr++) = length;
-      memcpy(alloc_ptr, data, length);
-      alloc_ptr += UNFIX(length);
-      return p + 1;
-    }
+  } else if (TAG(x, mask_symbol) == tag_symbol) {
+    return p + 1;
+  } else if (x == _nil) {
+    return p + 1;
   } else if (TAG(x, mask_procedure) == tag_procedure) {
     if (FORWARDED(UNTAG(x, tag_procedure)) ||
         (heap <= (char *)(UNTAG(x, tag_procedure)) &&
@@ -545,17 +542,29 @@ static ptr *collect_one(ptr *p) {
       } else
         return p + 1;
     }
+  } else if (TAG(x, mask_fixnum) == tag_fixnum) {
+    return p + 1;
   } else if (x == _false) {
     return p + 1;
   } else if (x == _true) {
     return p + 1;
-  } else if (x == _nil) {
-    return p + 1;
-  } else if (x == _void) {
-    return p + 1;
-  } else if (TAG(x, mask_symbol) == tag_symbol) {
-    return p + 1;
   } else if (TAG(x, mask_char) == tag_char) {
+    return p + 1;
+  } else if (TAG(x, mask_vector) == tag_vector) {
+    long length = VECTORLENGTH(x);
+    /* forwarded? */
+    if (TAG(length, mask_vector) == tag_vector) {
+      *p = length;
+      return p + 1;
+    } else {
+      *p = VECTORLENGTH(x) = DOTAG(alloc_ptr, tag_vector);
+      ptr *data = VECTORDATA(x);
+      *(alloc_ptr++) = length;
+      memcpy(alloc_ptr, data, length);
+      alloc_ptr += UNFIX(length);
+      return p + 1;
+    }
+  } else if (x == _void) {
     return p + 1;
   } else {
     fprintf(stderr, "unrecognized object %ld during collection\n", x);
@@ -619,17 +628,22 @@ static void guard_area(char *addr, long n) {
   }
 }
 
-static long next_heapsize(long n, long extra) {
-  long m;
-
-  m = n + extra;
-  m = m + m / 3;
-  m = ((m + pagesize - 1) / pagesize) * pagesize;
-  return m;
-}
+/* #include <time.h> */
 
 ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
-  long new_heapsize = next_heapsize(heapsize, extra);
+  /* struct timespec begin, end; */
+  /* clock_gettime(CLOCK_REALTIME, &begin); */
+
+  /* static int n = 0; */
+  /* n += 1; */
+  /* fprintf(stderr, "%d-th garbage collection. asking for %ld extra bytes\n", n, extra); */
+  /* fprintf(stderr, "  old heap size: %ld \tbytes\n", heap_end - heap); */
+
+  long new_heapsize = heapsize;
+  do
+    new_heapsize *= 2;
+  while (new_heapsize <= heapsize + extra);
+
   new_heap = (ptr *)unguarded_area(new_heapsize);
   new_heap_end = (ptr *)((char *)new_heap + new_heapsize);
   alloc_ptr = new_heap;
@@ -641,17 +655,28 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
 
   free_area(heap, heapsize);
 
-  if ((char *)new_heap + heapsize - (char *)alloc_ptr >= extra) {
+  long used = (char *)alloc_ptr - (char *)new_heap;
+  /* fprintf(stderr, "  live data:     %ld \tbytes\n", used); */
+  heapsize = new_heapsize;
+  while ((used + extra) <= heapsize / 2 &&
+         heapsize / 2 >= heap_size * sizeof(void *))
+    heapsize /= 2;
+  /* fprintf(stderr, "  new heap size: %ld \tbytes\n", heapsize); */
+  if (heapsize < new_heapsize) {
     fit_heap((char *)new_heap,
              new_heapsize,
              heapsize);
     new_heap_end = (ptr *)((char *)new_heap + heapsize);
-  } else
-    heapsize = new_heapsize;
+  }
   guard_area((char *)new_heap, heapsize);
 
   heap = (char *)new_heap;
   heap_end = (char *)new_heap_end;
   *end_of_allocation = new_heap_end;
+
+  /* clock_gettime(CLOCK_REALTIME, &end); */
+  /* long nanosec = (end.tv_sec - begin.tv_sec) * 1e9 + end.tv_nsec - begin.tv_nsec; */
+  /* gc_time += nanosec; */
+
   return alloc_ptr;
 }

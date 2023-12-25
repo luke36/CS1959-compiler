@@ -754,6 +754,13 @@
 
 ;;; running assembly code
 
+(define-who c-compiler
+  (make-parameter "gcc"
+    (lambda (s)
+      (unless (string? s)
+        (format-error 'who "~s is not a string" s))
+      s)))
+
 (define-who build-and-run
   (define file-root "t")
   (define shell
@@ -771,7 +778,7 @@
         (newline)
         (display-string output-string))
       'replace)
-    (unless (= (shell "gcc -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" exe-file src-file out-file) 0)
+    (unless (= (shell "~a -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
       (printf "========\n")
       (shell "cat ~a" out-file)
       (format-error who "build error(s)"))

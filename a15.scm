@@ -20,9 +20,9 @@
 (define *closure-optimization-enabled* #t)
 (define *iterated-coalescing-enabled* #t)
 (define *optimize-jumps-enabled* #t)
-(define *max-inline-literal-size* 5)
+(define *max-inline-literal-size* 64)
 (define *collection-enabled* #t)
-(define *max-conservative-range* #f) ; may ask for more space than actually needed
+(define *max-conservative-range* 1024) ; may ask for more space than actually needed
 
 (set! allocation-pointer-register 'r11) ; leave rdx for division
 (define stack-base-register 'r14)
@@ -4172,15 +4172,6 @@
                          cc))
                    (call/cc (lambda (c) c)))])
             (yin yang)))))
-    ;; show frames
-    '(letrec ([kk #f]
-              [fact
-                (lambda (n)
-                  (cond [(<= n 0) (call/cc (lambda (k) (set! kk k) 1))]
-                        [else (* n (fact (- n 1)))]))])
-       (begin
-         (fact 10)
-         (inspect kk)))
     ;; easy collection
     (letrec ([malloc
                (lambda (n)
@@ -4190,6 +4181,16 @@
                        (vector-set! trash 0
                          (malloc (- n 1))))))])
       (malloc 5))))
+
+(define test-trace
+  '(letrec ([kk #f]
+            [fact
+              (lambda (n)
+                (cond [(<= n 0) (call/cc (lambda (k) (set! kk k) 1))]
+                      [else (* n (fact (- n 1)))]))])
+     (begin
+       (fact 10)
+       (inspect kk))))
 
 (define fake-interpreter
   '(letrec
