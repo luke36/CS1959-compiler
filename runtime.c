@@ -49,7 +49,6 @@ static void print(long x);
 /* local stack/heap management variables */
 static long pagesize;
 static char *heap;
-static char *heap_end;
 static char *stack;
 static long heapsize;
 static long stacksize;
@@ -98,7 +97,6 @@ int main(int argc, char *argv[]) {
 
   stack = guarded_area(stacksize);
   heap = guarded_area(heapsize);
-  heap_end = heap + heapsize;
 
  /* Set up segmentation fault signal handler to catch stack and heap
   * overflow and some memory faults */
@@ -671,7 +669,6 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
   guard_area((char *)new_heap, heapsize);
 
   heap = (char *)new_heap;
-  heap_end = (char *)new_heap_end;
   *end_of_allocation = new_heap_end;
 
   /* clock_gettime(CLOCK_REALTIME, &end); */

@@ -15,6 +15,8 @@
 (load "fmts.pretty")
 (load "a15-wrapper.scm")
 
+(game-eval compile)
+
 (define *standard* 'r6rs)
 (define *cp-1-enabled* #t) ; better set to #f when testing trivial cases
 (define *closure-optimization-enabled* #t)
@@ -23,6 +25,7 @@
 (define *max-inline-literal-size* 64)
 (define *collection-enabled* #t)
 (define *max-conservative-range* 1024) ; may ask for more space than actually needed
+(define *continuation-enabled* #t)
 
 (set! allocation-pointer-register 'r11) ; leave rdx for division
 (define stack-base-register 'r14)
@@ -144,9 +147,9 @@
         `(let ,binding (assigned ,assign ,body)))))
 
 (define value-primitives
-  '(+ - * quotient remainder car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code integer->char char->integer read-char call-with-current-continuation))
+  `(+ - * quotient remainder car cdr cons make-vector vector-length vector-ref void make-procedure procedure-ref procedure-code integer->char char->integer read-char ,@(if *continuation-enabled* '(call-with-current-continuation) '())))
 (define side-effect-primitives
-  '(read-char call-with-current-continuation))
+  '(read-char ,@(if *continuation-enabled* '(call-with-current-continuation) '())))
 (define predicate-primitives
   '(<= < = >= > boolean? eq? fixnum? null? pair? vector? procedure? symbol? char=? char?))
 (define effect-primitives
@@ -163,7 +166,7 @@
   (lambda (x) (memq x side-effect-primitives)))
 
 (define user-primitive
-  '([+             . 2]
+  `([+             . 2]
     [-             . 2]
     [*             . 2]
     [quotient      . 2]
@@ -195,7 +198,7 @@
     [set-car!      . 2]
     [set-cdr!      . 2]
     [vector-set!   . 3]
-    [call-with-current-continuation . 1]
+    ,@(if *continuation-enabled* '([call-with-current-continuation . 1]) '())
     [inspect       . 1]
     [write         . 1]
     [display       . 1]
@@ -334,11 +337,12 @@
           [#f '(quote #f)]
           [,n (guard (integer? x) (exact? x) (fixnum-range? x)) `(quote ,n)]
           [,ch (guard (char? ch)) `(quote ,ch)] ; ascii only
-          [call/cc 'call-with-current-continuation]
+          [call/cc (guard *continuation-enabled*) 'call-with-current-continuation]
           [,var (guard (symbol? var)) ((Var env) var)]
           [(,proc ,[(Expr env) -> arg*] ...) (guard (assq proc env))
            `(,((Expr env) proc) ,arg* ...)]
-          [(call/cc ,rand* ...) ((Expr env) `(call-with-current-continuation ,rand* ...))]
+          [(call/cc ,rand* ...) (guard *continuation-enabled*)
+           ((Expr env) `(call-with-current-continuation ,rand* ...))]
           [(,prim ,[(Expr env) -> rand*] ...) (guard (user-primitive? prim))
            (if (= (user-primitive->arity prim) (length rand*))
                `(,prim ,rand* ...)
@@ -562,7 +566,7 @@
            (if no-effect? #f
                ((simple? x* no-capture? no-effect?) expr))]
           [(lambda (,uvar* ...) (assigned (,as* ...) ,expr)) ((simple? x* #f #f) expr)]
-          [(call-with-current-continuation ,expr)
+          [(call-with-current-continuation ,expr) (guard *continuation-enabled*)
            (cond [no-effect? #f]
                  [(and no-capture? (eq? *standard* 'r5rs)) #f]
                  [else ((simple? x* no-capture? no-effect?) expr)])]
@@ -1331,7 +1335,7 @@
 
 (define-who expose-library-procedures
   (define lib-prim*
-    '(call-with-current-continuation inspect write display read-char))
+    `(,@(if *continuation-enabled* '(call-with-current-continuation) '()) inspect write display read-char))
   (define lib-proc*
     (map
       (lambda (p)
@@ -2097,7 +2101,7 @@
                        ,frame-pointer-register
                        ,return-address-register
                        ,allocation-pointer-register
-                       ,stack-base-register
+                       ,@(if *continuation-enabled* (list stack-base-register) '())
                        ,@(if *collection-enabled* (list end-of-allocation-register) '())
                        ,@(map cadr fill-register) ,@(map cadr fill-frame))))]
           [,expr `(begin (set! ,return-value-register ,expr)
@@ -2105,7 +2109,7 @@
                            ,frame-pointer-register
                            ,return-value-register
                            ,allocation-pointer-register
-                           ,stack-base-register
+                           ,@(if *continuation-enabled* (list stack-base-register) '())
                            ,@(if *collection-enabled* (list end-of-allocation-register) '())))]))))
   (define Pred
     (lambda (p)
@@ -2135,7 +2139,7 @@
                          ,frame-pointer-register
                          ,return-address-register
                          ,allocation-pointer-register
-                         ,stack-base-register
+                         ,@(if *continuation-enabled* (list stack-base-register) '())
                          ,@(if *collection-enabled* (list end-of-allocation-register) '())
                          ,@(map cadr fill-register) ,@(map cadr fill-new-frame))))))]
         [(set! ,uvar (,proc ,args* ...)) (guard
@@ -3607,6 +3611,7 @@
       (printf "\n** Options **
         scheme standard:               ~a
         garbage collection:            ~a
+        continuation:                  ~a
         encode large literals:         ~a
         iterated register coalescing:  ~a
         closure optimization:          ~a
@@ -3614,6 +3619,7 @@
         optimize jumps:                ~a\n\n"
               *standard*
               (bool->word *collection-enabled*)
+              (bool->word *continuation-enabled*)
               (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
@@ -3655,8 +3661,10 @@
        (emit 'pushq 'r14)
        (emit 'pushq 'r15)
        (emit 'movq 'rdi frame-pointer-register)
-       (emit 'movq 'rdi stack-base-register)
-       (emit 'movq 'rdx end-of-allocation-register)
+       (if *continuation-enabled*
+           (emit 'movq 'rdi stack-base-register))
+       (if *collection-enabled*
+           (emit 'movq 'rdx end-of-allocation-register))
        (emit 'movq 'rsi allocation-pointer-register)
        (emit 'leaq "_scheme_exit(%rip)" return-address-register)
        code code* ...
@@ -3981,7 +3989,8 @@
   (lambda arg*
     (fluid-let ([tests tests-extra])
       (apply test-all arg*))
-    (test-one `,(list 'quote tests))))
+    (test-one `,(list 'quote tests))
+    (test-one test-interpreter)))
 
 (define tests-extra
   '('a
