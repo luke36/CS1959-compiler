@@ -2542,7 +2542,7 @@
         [(,triv ,loc* ...)
          (if (integer? triv)
              (let ([temp (unique-name 'u)])
-               (values `(begin (set! ,temp ,triv) (,temp ,loc*))
+               (values `(begin (set! ,temp ,triv) (,temp ,loc* ...))
                        (list temp)))
              (values t '()))])))
   (define Pred
@@ -2689,17 +2689,23 @@
         [(set! ,v (,rator ,x ,v)) (guard (commutative? rator))
          (Effect `(set! ,v (,rator ,v ,x)))]
         [(set! ,v (,rator ,x ,y)) (guard (not (frame-var? v)))
-         (let-values ([(f s)
-                       (if (and (commutative? rator)
-                                (or (not-so-trivial? y)
-                                    (and (very-trivial? x)
-                                         (or (uvar? y) (register? y))))) ; chance to coalesce
-                           (values y x)
-                           (values x y))])
-           (let-values ([(e^ u)
-                         (Effect `(begin (set! ,v ,f)
-                                         (set! ,v (,rator ,v ,s))))])
-             (values e^ u)))]
+         (if (eq? v y)
+             (let ([temp (unique-name 'u)])
+               (let-values ([(e^ u)
+                             (Effect `(begin (set! ,temp (,rator ,x ,y))
+                                             (set! ,v ,temp)))])
+                 (values e^ (cons temp u))))
+             (let-values ([(f s)
+                           (if (and (commutative? rator)
+                                    (or (not-so-trivial? y)
+                                        (and (very-trivial? x)
+                                             (or (uvar? y) (register? y))))) ; chance to coalesce
+                               (values y x)
+                               (values x y))])
+               (let-values ([(e^ u)
+                             (Effect `(begin (set! ,v ,f)
+                                             (set! ,v (,rator ,v ,s))))])
+                 (values e^ u))))]
         [(set! ,fv (,rator ,x ,y))
          (cond [(and (not (eq? rator '*))
                      (very-trivial? x)
