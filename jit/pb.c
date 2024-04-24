@@ -1,16 +1,17 @@
 #include "pb.h"
+#include "compile.h"
 #include <stdio.h>
 
 #define LOAD_UNALIGNED_PTR(addr)                                        \
   ((((uptr)((unsigned *)(addr))[1]) << 32) | ((unsigned *)(addr))[0])
 #define SHIFT_MASK(v) ((v) & (64-1))
 
-void pb_interp(instruction_t *bytecode) {
+void pb_interp(machine_state *ms, instruction_t *bytecode) {
   instruction_t *ip = bytecode, *next_ip, instr;
 
   int flag = 0;
 
-#define regs (ms.machine_regs)
+#define regs (ms->machine_regs)
 
   while (1) {
     instr = *ip;
@@ -117,12 +118,6 @@ void pb_interp(instruction_t *bytecode) {
       regs[INSTR_dri_dest(instr)] =
         (iptr)regs[INSTR_dri_reg(instr)] >> SHIFT_MASK(INSTR_dri_imm(instr));
       break;
-    case pb_un_not_register:
-      regs[INSTR_dr_dest(instr)] = ~regs[INSTR_dr_reg(instr)];
-      break;
-    case pb_un_not_immediate:
-      regs[INSTR_di_dest(instr)] = ~(uptr)INSTR_di_imm(instr);
-      break;
     case pb_ld_immediate:
       regs[INSTR_dri_dest(instr)] =
         *(uptr *)(regs[INSTR_dri_reg(instr)] + INSTR_dri_imm(instr));
@@ -186,23 +181,35 @@ void pb_interp(instruction_t *bytecode) {
       regs[INSTR_adr_dest(instr)] = (uptr)next_ip + (INSTR_adr_imm(instr) << 2);
       break;
     case pb_call_immediate:
-      pb_interp((instruction_t *)((char *)next_ip + INSTR_i_imm(instr)));
+      pb_interp(ms, (instruction_t *)((char *)next_ip + INSTR_i_imm(instr)));
       break;
     case pb_call_register:
-      pb_interp((instruction_t *)regs[INSTR_dr_reg(instr)]);
+      pb_interp(ms, (instruction_t *)regs[INSTR_dr_reg(instr)]);
       break;
     case pb_tcall_immediate:
-      return pb_interp((instruction_t *)((char *)next_ip + INSTR_i_imm(instr)));
+      return pb_interp(ms, (instruction_t *)((char *)next_ip + INSTR_i_imm(instr)));
     case pb_tcall_register:
-      return pb_interp((instruction_t *)regs[INSTR_dr_reg(instr)]);
+      return pb_interp(ms, (instruction_t *)regs[INSTR_dr_reg(instr)]);
     case pb_return:
       return;
     case pb_jit:
-      *(unsigned *)(ip + 1) -= 1;
-      next_ip = ip + 3;
+      *(int *)(ip + 1) -= 1;
+      if (*(int *)(ip + 1) <= 0) {
+        *ip = (instruction_t)pb_ntcall;
+        *(ip + 1) = (uint64_t)(ms->codep);
+        *(ip + 2) = (uint64_t)(ms->codep) >> 32;
+        ms->codep = compile(ip + 3, ms->codep);
+        next_ip = ip;
+      } else {
+        next_ip = ip + 3;
+      }
       break;
     case pb_ncall:
-      return ((void (*)())LOAD_UNALIGNED_PTR(ip + 1))();
+      ((void (*)(machine_state *))LOAD_UNALIGNED_PTR(ip + 1))(ms);
+      next_ip = ip + 3;
+      break;
+    case pb_ntcall:
+      return ((void (*)(machine_state *))LOAD_UNALIGNED_PTR(ip + 1))(ms);
     }
 
     ip = next_ip;

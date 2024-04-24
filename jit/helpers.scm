@@ -795,7 +795,7 @@
         x))))
 
 (define-who interpret-and-run
-  (define file-root "code")
+  (define file-root "t")
   (define shell
     (lambda (s . args)
       (system (apply format s args))))
@@ -811,7 +811,7 @@
         (newline)
         (display-string output-string))
       'replace)
-    (unless (= (shell "~a -m64 -o ~a runtime.c pb.c ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
+    (unless (= (shell "~a -m64 -g -o ~a runtime.o pb.o ir.o common.o genir.o hashtbl.o select.o set.o list.o compile.o assembler.o color.o liveness.o gen_x86_64.o ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
       (printf "========\n")
       (shell "cat ~a" out-file)
       (format-error who "build error(s)"))

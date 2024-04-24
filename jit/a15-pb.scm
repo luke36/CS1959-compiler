@@ -26,6 +26,7 @@
 (define *collection-enabled* #f)
 (define *max-conservative-range* 1024) ; may ask for more space than actually needed
 (define *continuation-enabled* #f)
+(define *jit-after* 1)
 
 (set! registers '(r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15))
 (set! caller-saved-registers registers)
@@ -3233,6 +3234,17 @@
   (define Triv Var)
   Program)
 
+(define-who prepend-jit-flags
+  (define Tail
+    (lambda (t)
+      (if *jit-after*
+          (make-begin `((jit ,*jit-after*) ,t))
+          t)))
+  (lambda (p)
+    (match-with-default-wrappers p
+      [(letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,body)
+       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
+
 (define-who expose-basic-blocks
   (define frame-information)
   (define Program
@@ -3435,123 +3447,13 @@
          `(set! ,v1 (,rator ,v2 ,v3))]
         [(set! ,v1 ,[Triv -> v2])
          `(set! ,v1 ,v2)]
-        [(call ,[Triv -> v]) `(call ,v)])))
+        [(call ,[Triv -> v]) `(call ,v)]
+        [(jit ,x) e])))
   (define Triv
     (lambda (triv)
       (cond [(assq triv label-alias) => cadr]
             [else triv])))
   Program)
-
-;; taken from yinwang
-(define *enable-analyze* #f)
-
-(define *all-closures* '())
-
-(define-who analyze-closure-size
-  (define Lambda
-    (lambda (x)
-      (match x
-        [(lambda (,fml* ...)
-           (bind-free (,cp ,free* ...)
-             ,[Expr -> s*]))
-         s*]
-        [,x (error who "invalid Lambda ~s" x)])))
-  (define Expr
-    (lambda (x)
-      (match x
-        [,label (guard (label? label)) '()]
-        [,uvar (guard (uvar? uvar)) '()]
-        [(quote ,imm) '()]
-        [(if ,[test-s*] ,[conseq-s*] ,[altern-s*])
-         (append test-s* conseq-s* altern-s*)]
-        [(begin ,[s**] ... ,[s*]) (apply append s* s**)]
-        [(let ([,lhs* ,[s**]] ...) ,[s*]) (apply append s* s**)]
-        [(letrec ([,llabel* ,[Lambda -> s**]] ...)
-           (closures ([,name* ,clabel* ,free** ...] ...)
-             (well-known ,wk*
-               ,[s*])))
-         (apply append (map length free**) s* s**)]
-        [(,prim ,[s**] ...)
-         (guard (primitive? prim))
-         (apply append s**)]
-        [(,[s*] ,[s**] ...) (apply append s* s**)]
-        [,x (error who "invalid Expr ~s" x)])))
-  (define analyze
-    (lambda (x)
-      (let ([s* (Expr x)])
-        (let ([n (length s*)])
-          (set! *all-closures* (append *all-closures* s*))
-          (printf "closure num = ~s, avg = ~s: ~s\n"
-                  n
-                  (if (= n 0) '* (exact->inexact (/ (apply + s*) n)))
-                  s*)))
-      x))
-  (lambda (x)
-    (if *enable-analyze*
-        (analyze x)
-        x)))
-
-(define *all-code-size* '())
-
-(define analyze-code-size
-  (lambda (x)
-    (define analyze
-      (lambda (x)
-        (match x
-          [((data ,data* ...)
-            (code ,[ins*] ...))
-           (printf "code size: ~a\n" (apply + ins*))
-           (set! *all-code-size* (cons (apply + ins*) *all-code-size*))
-           x]
-          [,x (if (or (label? x)
-                      (eq? (car x) 'quad)
-                      (eq? (car x) 'live-mask)
-                      (eq? (car x) 'align)
-                      (eq? (car x) 'zeros)) 0 1)])))
-    (if *enable-analyze*
-        (analyze x)
-        x)))
-
-(define test-all-analyze
-  (lambda ()
-    (define bool->word
-      (lambda (x)
-        (if x "Yes" "No")))
-    (fluid-let ([*enable-analyze* #t]
-                [*all-closures* '()]
-                [*all-code-size* '()])
-      (test-all #f)
-      (printf "\n** Options **
-        scheme standard:               ~a
-        garbage collection:            ~a
-        continuation:                  ~a
-        encode large literals:         ~a
-        iterated register coalescing:  ~a
-        closure optimization:          ~a
-        pre-optimization:              ~a
-        optimize jumps:                ~a\n\n"
-              *standard*
-              (bool->word *collection-enabled*)
-              (bool->word *continuation-enabled*)
-              (if (not *max-inline-literal-size*) "No" (format "Above ~a" *max-inline-literal-size*))
-              (bool->word *iterated-coalescing-enabled*)
-              (bool->word *closure-optimization-enabled*)
-              (bool->word *cp-1-enabled*)
-              (bool->word *optimize-jumps-enabled*))
-      (printf "** closure analysis report **
-       total closures created:  ~a
-       total free var:          ~a
-       average free var:        ~a\n\n"
-              (length *all-closures*)
-              (apply + *all-closures*)
-              (exact->inexact (/ (apply + *all-closures*)
-                                 (length *all-closures*))))
-      (printf "** code length report **
-       total code length:    ~a
-       average code length:  ~a\n"
-              (apply + *all-code-size*)
-              (exact->inexact (/ (apply + *all-code-size*)
-                                 (length *all-code-size*)))))))
 
 (define rand->pb-arg
   (lambda (rand)
@@ -3693,7 +3595,7 @@
     (syntax-rules ()
       [(_ code code* ...)
        (begin
-         (maybe-printf "instruction_t code[] = {\n")
+         (maybe-printf "instruction_t __code[] = {\n")
          code code* ...
          (maybe-printf "};\n"))]))
 
@@ -3723,6 +3625,9 @@
         [,label (guard (or (label? label) (string? label)))
           (when gathering-label
             (set! label-pc (cons `(,label ,pc) label-pc)))]
+        [(jit ,n)
+         (set! pc (+ 3 pc))
+         (maybe-printf "  pb_mk_jit(~a),\n" (rand->pb-arg n))]
         [(jump ,dst) (emit-jump 'always dst)]
         [(call ,dst) (emit-call 'call dst)]
         [(tail-call ,dst) (emit-call 'tcall dst)]
@@ -3822,7 +3727,6 @@
   uncover-well-known
   optimize-free
   optimize-self-reference
-  analyze-closure-size
   introduce-procedure-primitives
   lift-letrec
   normalize-context
@@ -3849,145 +3753,19 @@
   discard-call-live
   finalize-locations
   expose-frame-var
+  prepend-jit-flags
   expose-basic-blocks
   optimize-jumps
   flatten-program
-  analyze-code-size
   generate-portable-bytecode
 ))
 
 (load "../tests15.scm")
 
+(define shell
+  (lambda (s . args)
+    (system (apply format s args))))
+(shell "~a -m64 -g -c runtime.c pb.c ir.c common.c genir.c hashtbl.c select.c set.c list.c compile.c assembler.c color.c liveness.c gen_x86_64.c" (c-compiler))
+
 (trusted-passes #t)
 
-;; special tests
-
-(define fake-interpreter
-  '(letrec
-       ([extend (lambda (x v e) (cons (cons x v) e))]
-        [extend*
-          (lambda (xs vs e)
-            (if (null? xs) e
-                (extend* (cdr xs) (cdr vs)
-                  (extend (car xs) (car vs) e))))]
-        [map
-          (lambda (f l)
-            (if (null? l) '()
-                (cons (f (car l)) (map f (cdr l)))))]
-        [find
-          (lambda (x e)
-            (cond [(null? e) #f]
-                  [(eq? (car (car e)) x) (cdr (car e))]
-                  [else (find x (cdr e))]))]
-        [apply
-          (lambda (clos vs)
-            (if (eq? (car clos) 'lambda)
-                ;; (xs env . e)
-                (let ([xs (car (cdr clos))]
-                      [env (car (cdr (cdr clos)))]
-                      [e (cdr (cdr (cdr clos)))])
-                  (eval1 e (extend* xs vs env)))
-                ;; letrec bundle
-                ;; (x ((x-1 . f-1) ... (x-n . f-n)) . env)
-                (let ([x (car (cdr clos))]
-                      [x-f* (car (cdr (cdr clos)))]
-                      [env (cdr (cdr (cdr clos)))])
-                  (let ([f (find x x-f*)]
-                        [env^ (extend*
-                                (map (lambda (x-f) (car x-f)) x-f*)
-                                (map (lambda (x-f) (cons 'letrec (cons (car x-f) (cons x-f* env)))) x-f*)
-                                env)])
-                    (let ([xs (car (cdr f))]
-                          [e (car (cdr (cdr f)))])
-                      (eval1 e (extend* xs vs env^)))))))]
-        [eval1*
-          (lambda (es env)
-            (if (null? es) '()
-                (cons (eval1 (car es) env) (eval1* (cdr es) env))))]
-        [eval-binary-operator
-          (lambda (rator)
-            (cond
-              [(eq? rator '*) (lambda (x y) (* x y))]
-              [(eq? rator '+) (lambda (x y) (+ x y))]
-              [(eq? rator '-) (lambda (x y) (- x y))]
-              [(eq? rator '<) (lambda (x y) (< x y))]
-              [(eq? rator '<=) (lambda (x y) (<= x y))]
-              [(eq? rator '=) (lambda (x y) (= x y))]
-              [(eq? rator '>) (lambda (x y) (> x y))]
-              [(eq? rator '>=) (lambda (x y) (>= x y))]
-              [(eq? rator 'eq?) (lambda (x y) (eq? x y))]
-              [(eq? rator 'cons) (lambda (x y) (cons x y))]
-              [else #f]))]
-        [eval-unary-operator
-          (lambda (rator)
-            (cond
-              [(eq? rator 'boolean?) (lambda (x) (boolean? x))]
-              [(eq? rator 'fixnum?) (lambda (x) (fixnum? x))]
-              [(eq? rator 'null?) (lambda (x) (null? x))]
-              [(eq? rator 'pair?) (lambda (x) (pair? x))]
-              [(eq? rator 'procedure?) (lambda (x) (procedure? x))]
-              [(eq? rator 'car) (lambda (x) (car x))]
-              [(eq? rator 'cdr) (lambda (x) (cdr x))]
-              [(eq? rator 'symbol?) (lambda (x) (symbol? x))]
-              [else #f]))]
-        [eval1
-          (lambda (e env)
-            (cond
-              [(fixnum? e) e]
-              [(boolean? e) e]
-              [(symbol? e) (find e env)]
-              [(eq? (car e) 'quote) (car (cdr e))]
-              [(eq? (car e) 'if)
-               (if (eval1 (car (cdr e)) env)
-                   (eval1 (car (cdr (cdr e))) env)
-                   (eval1 (car (cdr (cdr (cdr e)))) env))]
-              [(eq? (car e) 'lambda)
-               (cons 'lambda
-                 (cons (car (cdr e))
-                   (cons env (car (cdr (cdr e))))))]
-              [(eq? (car e) 'let)
-               (let ([x-e* (car (cdr e))])
-                 (let ([e* (map (lambda (x-e) (car (cdr x-e))) x-e*)])
-                   (let ([v* (eval1* e* env)])
-                     (eval1 (car (cdr (cdr e)))
-                       (extend*
-                         (map (lambda (x-e) (car x-e)) x-e*)
-                         v*
-                         env)))))]
-              [(eq? (car e) 'letrec)
-               (let ([x--f* (car (cdr e))])
-                 (let ([x-f* (map (lambda (x--f) (cons (car x--f) (car (cdr x--f)))) x--f*)]
-                       [x* (map (lambda (x--f) (car x--f)) x--f*)])
-                   (eval1 (car (cdr (cdr e)))
-                     (extend*
-                       x*
-                       (map (lambda (x) (cons 'letrec (cons x (cons x-f* env)))) x*)
-                       env))))]
-              [(eval-binary-operator (car e))
-               ((eval-binary-operator (car e))
-                (eval1 (car (cdr e)) env)
-                (eval1 (car (cdr (cdr e))) env))]
-              [(eval-unary-operator (car e))
-               ((eval-unary-operator (car e))
-                (eval1 (car (cdr e)) env))]
-              [else (apply (eval1 (car e) env) (eval1* (cdr e) env))]))])
-     (lambda (e) (eval1 e '()))))
-
-(define test-interpreter
-  `(let ([eval ,fake-interpreter]
-         [quote-eval (quote ,(parse-scheme fake-interpreter))])
-     (letrec ((deep (lambda (n)
-                      (if (<= n 0)
-                          '(letrec ((fac (lambda (n)
-                                           (if (<= n 0)
-                                               1
-                                               (* n (fac (- n 1)))))))
-                             (fac 10))
-                          (cons
-                            quote-eval
-                            (cons
-                              (cons
-                                'quote
-                                (cons (deep (- n 1)) '()))
-                              '()))))))
-       (eval (deep 1)))))

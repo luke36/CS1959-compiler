@@ -6,4 +6,10 @@ t.out
 t.out.tmp
 chez-exe
 seal
-jit/code*
+jit/t
+jit/t.c
+jit/t.out
+jit/test.S
+jit/test.o
+jit/.clangd
+jit/*.o

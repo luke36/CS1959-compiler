@@ -11,16 +11,19 @@
 #include <wchar.h>
 #include <locale.h>
 #include "pb.h"
+#include "genir.h"
 
 machine_state ms;
 
 extern uptr __scheme_symbol_dump[];
-extern instruction_t code[];
+extern instruction_t __code[];
 
 #define stack_size 100000
 
 /* decrease this to stress the GC */
 #define heap_size 100000
+
+#define code_size 100000
 
 #ifdef __APPLE__
 #define SCHEME_ENTRY scheme_entry
@@ -33,7 +36,7 @@ extern instruction_t code[];
 #define SCHEME_SYMBOL_TO_ADDRESS _scheme_symbol_to_address
 
 /* locally defined functions */
-static char *guarded_area(long n);
+static char *guarded_area(long n, int executable);
 #ifdef __APPLE__
 static void segv_handler(int signo, siginfo_t *info, void *ignore);
 #endif
@@ -49,12 +52,14 @@ static long pagesize;
 
 /* long gc_time; */
 
-int main(int argc, char *argv[]) {
 #define heap (ms.heap)
 #define stack (ms.stack)
+#define code (ms.code)
 #define heapsize (ms.heapsize)
 #define stacksize (ms.stacksize)
+#define codesize (ms.codesize)
 
+int main(int argc, char *argv[]) {
   struct sigaction action;
   sigset_t s_set;
   int n;
@@ -68,6 +73,7 @@ int main(int argc, char *argv[]) {
 
   stacksize = stack_size * sizeof(void *);
   heapsize = heap_size * sizeof(void *);
+  codesize = code_size * sizeof(void *);
 
   for (n = 1; n < argc; n++)
     if ((*argv[n] == '-') && (*(argv[n]+2) == 0))
@@ -93,9 +99,12 @@ int main(int argc, char *argv[]) {
  /* round stack and heap sizes to even pages */
   stacksize = ((stacksize + pagesize - 1) / pagesize) * pagesize;
   heapsize = ((heapsize + pagesize - 1) / pagesize) * pagesize;
+  codesize = ((codesize + pagesize - 1) / pagesize) * pagesize;
 
-  stack = guarded_area(stacksize);
-  heap = guarded_area(heapsize);
+  stack = guarded_area(stacksize, 0);
+  heap = guarded_area(heapsize, 0);
+  code = guarded_area(codesize, 1);
+  ms.codep = code;
 
  /* Set up segmentation fault signal handler to catch stack and heap
   * overflow and some memory faults */
@@ -123,10 +132,11 @@ int main(int argc, char *argv[]) {
   }
 
  /* run the Scheme program and print the result */
-  ms.machine_regs[0] = (uptr)heap;
-  ms.machine_regs[1] = (uptr)stack;
-  pb_interp(code);
-  print(ms.machine_regs[2]);
+  ms.machine_regs[pb_allocation_pointer] = (uptr)heap;
+  ms.machine_regs[pb_frame_pointer] = (uptr)stack;
+  /* fprintf(stderr, "%p", ms.codep); */
+  pb_interp(&ms, __code);
+  print(ms.machine_regs[pb_return_value]);
   wprintf(L"\n");
 
   /* fprintf(stderr, ";; GC time = %f s", (double)gc_time / 1e9); */
@@ -135,13 +145,13 @@ int main(int argc, char *argv[]) {
 }
 
 /* allocate a chunk of memory with a guard page on either end */
-static char *guarded_area(long n) {  /* n must be page aligned */
+static char *guarded_area(long n, int executable) {  /* n must be page aligned */
   char *addr;
 
  /* allocate, leaving room for guard pages */
   addr = (char *)mmap(NULL,
                       (size_t)(n + 2 * pagesize),
-                      PROT_READ | PROT_WRITE,
+                      PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : PROT_NONE),
                       MAP_PRIVATE | MAP_ANON,
                       -1, 0);
   if (addr == (char *)-1) {

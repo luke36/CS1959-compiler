@@ -1,3 +1,6 @@
+#ifndef PB_H
+#define PB_H
+
 #include <stdint.h>
 
 typedef int64_t  iptr;
@@ -57,9 +60,6 @@ enum {
   pb_bin_asr_register,
   pb_bin_asr_immediate,
 
-  pb_un_not_register,
-  pb_un_not_immediate,
-
   pb_ld_immediate,
   pb_ld_register,
   pb_st_immediate,
@@ -89,6 +89,7 @@ enum {
 
   pb_jit,
   pb_ncall,
+  pb_ntcall,
 };
 
 #define pb_mk_dr(op, dest, reg)                         \
@@ -133,8 +134,6 @@ enum {
 #define pb_mk_bin_lsr_immediate(dest, reg, imm)  pb_mk_dri(pb_bin_lsr_immediate, dest, reg, imm)
 #define pb_mk_bin_asr_register(dest, reg1, reg2) pb_mk_drr(pb_bin_asr_register, dest, reg1, reg2)
 #define pb_mk_bin_asr_immediate(dest, reg, imm)  pb_mk_dri(pb_bin_asr_immediate, dest, reg, imm)
-#define pb_mk_un_not_register(dest, reg)         pb_mk_dr(pb_un_not_register, dest, reg)
-#define pb_mk_un_not_immediate(dest, imm)        pb_mk_di(pb_un_not_immediate, dest, imm)
 #define pb_mk_ld_immediate(dest, reg, imm)       pb_mk_dri(pb_ld_immediate, dest, reg, imm)
 #define pb_mk_ld_register(dest, reg1, reg2)      pb_mk_drr(pb_ld_register, dest, reg1, reg2)
 #define pb_mk_st_immediate(dest, reg, imm)       pb_mk_dri(pb_st_immediate, dest, reg, imm) 
@@ -166,6 +165,10 @@ enum {
   ((instruction_t)pb_ncall),                    \
   ((instruction_t)((uptr)(p)),                  \
   ((instruction_t)((uptr)(p) >> 32))
+#define pb_mk_ntcall(p)                         \
+  ((instruction_t)pb_ntcall),                   \
+  ((instruction_t)((uptr)(p)),                  \
+  ((instruction_t)((uptr)(p) >> 32))
 
 #define pb_reg_count 16
 
@@ -182,10 +185,10 @@ typedef struct machine_state {
   char *stack;
   long stacksize;
   char *code;
-  char *codesize;
+  long codesize;
   char *codep;
 } machine_state;
 
-extern machine_state ms;
+void pb_interp(machine_state *ms, instruction_t *bytecode);
 
-void pb_interp(instruction_t *bytecode);
+#endif
