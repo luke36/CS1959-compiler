@@ -30,6 +30,7 @@ Comparison (change filename extension to run yscheme):
 ** Options **
         scheme standard:               r5rs
         garbage collection:            No
+        continuation:                  No
         encode large literals:         No
         iterated register coalescing:  Yes
         closure optimization:          Yes
@@ -42,13 +43,13 @@ Comparison (change filename extension to run yscheme):
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5744
-       average code length:  35.02439024390244
+       total code length:    5705
+       average code length:  34.78658536585366
 (time (test-all-analyze))
-    65 collections
-    0.210114854s elapsed cpu time, including 0.005291485s collecting
-    0.210109956s elapsed real time, including 0.005462918s collecting
-    538650976 bytes allocated, including 545938400 bytes reclaimed
+    56 collections
+    0.169742660s elapsed cpu time, including 0.007579784s collecting
+    0.169734244s elapsed real time, including 0.007707961s collecting
+    476153968 bytes allocated, including 472800272 bytes reclaimed
 ```
 
 ### additional features
