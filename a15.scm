@@ -3,6 +3,7 @@
 ;;       * remove useless set!
 ;;       * how to trace globals (more) precisely?
 ;;         A: no you can't do so with minimal effort (live masks should work?)
+;;       * utilize more addressing modes (for vector)
 
 (eval-when (compile load eval)
   (optimize-level 2)
@@ -13,7 +14,6 @@
 (load "helpers.scm")
 (load "driver.scm")
 (load "fmts.pretty")
-(load "a15-wrapper.scm")
 
 (game-eval compile)
 
@@ -1463,7 +1463,7 @@
          (trivialize
            (lambda (e1^ e2^)
              (let ([tmp (unique-name 'tmp)])
-               `(let ([,tmp (+ (alloc ,size-pair) ,tag-pair)])
+               `(let ([,tmp (alloc ,size-pair ,tag-pair)])
                   (begin (mset! ,tmp ,offset-car ,e1^)
                          (mset! ,tmp ,offset-cdr ,e2^)
                          ,tmp))))
@@ -1471,23 +1471,23 @@
         [(make-procedure ,[Value -> lab] ,[Value -> e])
          (if (integer? e)
              (let ([tmp (unique-name 'tmp)])
-               `(let ([,tmp (+ (alloc ,(+ disp-procedure-data e)) ,tag-procedure)]) ; what if it overflows?
+               `(let ([,tmp (alloc ,(+ disp-procedure-data e) ,tag-procedure)]) ; what if it overflows?
                   (begin (mset! ,tmp ,offset-procedure-code ,lab)
                          ,tmp)))
              (let ([tmp1 (unique-name 'tmp)] [tmp2 (unique-name 'tmp)])
                `(let ([,tmp1 ,e])
-                  (let ([,tmp2 (+ (alloc (+ ,disp-procedure-data ,tmp1)) ,tag-procedure)])
+                  (let ([,tmp2 (alloc (+ ,disp-procedure-data ,tmp1) ,tag-procedure)])
                     (begin (mset! ,tmp2 ,offset-procedure-code ,tmp1)
                            ,tmp2)))))]
         [(make-vector ,[Value -> e])
          (if (integer? e)
              (let ([tmp (unique-name 'tmp)])
-               `(let ([,tmp (+ (alloc ,(+ disp-vector-data e)) ,tag-vector)])
+               `(let ([,tmp (alloc ,(+ disp-vector-data e) ,tag-vector)])
                   (begin (mset! ,tmp ,offset-vector-length ,e)
                          ,tmp)))
              (let ([tmp1 (unique-name 'tmp)] [tmp2 (unique-name 'tmp)])
                `(let ([,tmp1 ,e])
-                  (let ([,tmp2 (+ (alloc (+ ,disp-vector-data ,tmp1)) ,tag-vector)])
+                  (let ([,tmp2 (alloc (+ ,disp-vector-data ,tmp1) ,tag-vector)])
                     (begin (mset! ,tmp2 ,offset-vector-length ,tmp1)
                            ,tmp2)))))]
         [(void) $void]
@@ -1633,7 +1633,7 @@
          (values)]
         [(begin ,[Effect ->] ... ,[Tail ->]) (values)]
         [(if ,[Pred ->] ,[Tail ->] ,[Tail ->]) (values)]
-        [(alloc ,[Value ->]) (values)]
+        [(alloc ,[Value ->] ,disp) (values)]
         [(,rator ,[Value ->] ,[Value ->]) (guard (or (binop? rator)
                                                      (eq? rator 'mref))) (values)]
         [(,[Value ->] ,[Value ->] ...) (values)]
@@ -1667,7 +1667,7 @@
          (values)]
         [(begin ,[Effect ->] ... ,[Value ->]) (values)]
         [(if ,[Pred ->] ,[Value ->] ,[Value ->]) (values)]
-        [(alloc ,[Value ->]) (values)]
+        [(alloc ,[Value ->] ,disp) (values)]
         [(,rator ,[Value ->] ,[Value ->]) (guard (or (binop? rator)
                                                      (eq? rator 'mref))) (values)]
         [(,[Value ->] ,[Value ->] ...) (values)]
@@ -1702,8 +1702,8 @@
         [(if ,[Pred -> cond u1 c1] ,[Tail -> conseq u2 c2] ,[Tail -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
                  (union u1 u2 u3) (or u1 u2 u3))]
-        [(alloc ,[Value -> expr u c])
-         (values `(alloc ,expr) u c)]
+        [(alloc ,[Value -> expr u c] ,disp)
+         (values `(alloc ,expr ,disp) u c)]
         [(,rator ,[Value -> rand1 u1 c1] ,[Value -> rand2 u2 c2]) (guard (or (binop? rator)
                                                                              (eq? rator 'mref)))
          (values `(,rator ,rand1 ,rand2)
@@ -1759,8 +1759,8 @@
         [(if ,[Pred -> cond u1 c1] ,[Value -> conseq u2 c2] ,[Value -> alter u3 c3])
          (values `(if ,cond ,conseq ,alter)
                  (union u1 u2 u3) (or c1 c2 c3))]
-        [(alloc ,[Value -> expr u c])
-         (values `(alloc ,expr) u c)]
+        [(alloc ,[Value -> expr u c] ,disp)
+         (values `(alloc ,expr ,disp) u c)]
         [(,rator ,[Value -> rand1 u1 c1] ,[Value -> rand2 u2 c2]) (guard (or (binop? rator)
                                                                              (eq? rator 'mref)))
          (values `(,rator ,rand1 ,rand2)
@@ -1813,7 +1813,7 @@
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail]) (make-begin `(,effect* ... ,tail))]
         [(,rator ,[Value -> rand1] ,[Value -> rand2]) (guard (binop? rator))
          (remove-opera rator rand1 rand2)]
-        [(alloc ,[Value -> expr]) (remove-opera 'alloc expr)]
+        [(alloc ,[Value -> expr] ,disp) (remove-opera 'alloc expr disp)]
         [(mref ,[Value -> base] ,[Value -> offset])
          (remove-opera 'mref base offset)]
         [(,[Value -> rator] ,[Value -> rand*] ...) (process-procedure-call rator rand*)]
@@ -1845,7 +1845,7 @@
         [(begin ,[Effect -> effect*] ... ,[Value -> triv]) (make-begin `(,effect* ... ,triv))]
         [(,rator ,[Value -> rand1] ,[Value -> rand2]) (guard (binop? rator))
          (remove-opera rator rand1 rand2)]
-        [(alloc ,[Value -> expr]) (remove-opera 'alloc expr)]
+        [(alloc ,[Value -> expr] ,disp) (remove-opera 'alloc expr disp)]
         [(mref ,[Value -> base] ,[Value -> offset])
          (remove-opera 'mref base offset)]
         [(,[Value -> proc] ,[Value -> arg*] ...) (process-procedure-call proc arg*)]
@@ -1959,7 +1959,7 @@
         [(begin ,eff* ... ,[Tail -> tail l h])
          (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
            (values (make-begin `(,eff*^ ... ,tail)) l^ h^))]
-        [(alloc ,expr)
+        [(alloc ,expr ,disp)
          (if (number? expr)
              (values t expr expr)
              (values (wrap-with t expr) 0 0))]
@@ -1987,11 +1987,11 @@
     (lambda (low high)
       (lambda (e)
         (match e
-          [(set! ,uvar (alloc ,expr))
+          [(set! ,uvar (alloc ,expr ,disp))
            (if (number? expr)
                (values e (+ low expr) (+ high expr))
                (values (wrap-with e (list expr high)) 0 0))]
-          [(mset! ,base ,offset (alloc ,expr))
+          [(mset! ,base ,offset (alloc ,expr ,disp))
            (if (number? expr)
                (values e (+ low expr) (+ high expr))
                (values (wrap-with e (list expr high)) 0 0))]
@@ -2190,11 +2190,11 @@
   (define Effect
     (lambda (e)
       (match e
-        [(set! ,uvar (alloc ,expr))
-         `(begin (set! ,uvar ,allocation-pointer-register)
+        [(set! ,uvar (alloc ,expr ,disp))
+         `(begin (set! ,uvar (+ ,allocation-pointer-register ,disp))
                  (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
-        [(mset! ,base ,offset (alloc ,expr))
-         `(begin (mset! ,base ,offset ,allocation-pointer-register)
+        [(mset! ,base ,offset (alloc ,expr ,disp))
+         `(begin (mset! ,base ,offset (+ ,allocation-pointer-register ,disp))
                  (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
          `(if ,cond ,conseq ,alter)]
@@ -2681,7 +2681,8 @@
          (values e '())]
         [(set! ,v (- ,x ,y)) (guard (and (register-like? v)
                                          (register-like? x)
-                                         (integer? y)))
+                                         (integer? y)
+                                         (not (eq? v x))))
          (values `(set! ,v (+ ,x ,(- y))) '())]
         [(set! ,v (* ,x ,y) (guard (and (register-like? v)
                                         (or (and (not (integer? x)) (integer? y))
@@ -3119,8 +3120,11 @@
         [(locate (,home* ...) ,tail) #t]
         [,x (error who "invalid Body ~s" x)])))
   (lambda (x)
-    (match-with-default-wrappers x
-      [(letrec ([,label* (lambda () ,body*)] ...) ,body)
+    (match x
+      [(with-label-alias ,la
+         (with-global-data ,gd
+           (with-closure-length ,cl
+             (letrec ([,label* (lambda () ,body*)] ...) ,body))))
        (andmap all-home? `(,body ,body* ...))])))
 
 (define-who assign-frame
@@ -3953,6 +3957,7 @@
   generate-x86-64
 ))
 
+(load "a15-wrapper.scm")
 (load "tests15.scm")
 (load "tests15-extra.scm")
 
