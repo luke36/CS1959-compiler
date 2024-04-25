@@ -27,6 +27,7 @@
 (define *max-conservative-range* 1024) ; may ask for more space than actually needed
 (define *continuation-enabled* #t)
 
+;; (set! parameter-registers '(r8 r9 rdi rsi))
 (set! allocation-pointer-register 'r11) ; leave rdx for division
 (define stack-base-register 'r14)
 (define end-of-allocation-register 'r13)
@@ -2037,11 +2038,13 @@
                                  ,label-alias* ...)
                 (with-global-data ,data
                   (with-closure-length ,closure-length
-                    (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body))))]))
+                    (with-collect-label ,collect-label
+                      (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)))))]))
         p)))
 
 (define-who impose-calling-conventions
   (define new-frames)
+  (define collect-label)
   (define fetch-arguments
     (lambda (args which)
       (cond [(null? args) '()]
@@ -2131,7 +2134,7 @@
                   [in-new-frame (drop (length parameter-registers) args*)]
                   [fill-register (fill-arguments in-register parameter-registers)]
                   [fill-new-frame (fill-arguments in-new-frame #f)])
-             `(return-point ,rp-label
+             `(return-point ,rp-label ,(eq? proc collect-label)
                 (begin ,@fill-new-frame
                        ,@fill-register
                        (set! ,return-address-register ,rp-label)
@@ -2157,9 +2160,12 @@
         [,x x])))
   (lambda (p)
     (match-with-default-wrappers p
-      [(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body])
-       (let ([body*^ (map (lambda (p b) ((Body p) b)) uvar* body*)])
-         `(letrec ([,label* (lambda () ,body*^)] ...) ,body))])))
+      [(with-collect-label ,cl
+         (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,[(Body '()) -> body]))
+       (begin
+         (set! collect-label cl)
+         (let ([body*^ (map (lambda (p b) ((Body p) b)) uvar* body*)])
+           `(letrec ([,label* (lambda () ,body*^)] ...) ,body)))])))
 
 (define-who expose-allocation-pointer
   (define Body
@@ -2220,7 +2226,12 @@
                      (if (uvar? vv)
                          (let ([entry (assq vv graph)])
                            (set-cdr! entry (liveset-cons v (cdr entry))))))
-                   (add-v (cdr vv*)))))])
+                   (add-v (cdr vv*)))))]
+           [make-liveset
+             (lambda (loc)
+               (cond [(null? loc) '()]
+                     [else (liveset-cons (car loc) (make-liveset (cdr loc)))]))])
+    (define return-point)
     (define call-live)
     (define Program
       (lambda (p)
@@ -2234,6 +2245,7 @@
           [(locals (,uvar* ...)
              (with-return-point ,rp
                (new-frames (,nfv* ...) ,tail)))
+           (set! return-point rp) ; hack
            (set! graph
              (map (lambda (x) (list x)) uvar*))
            (let-values ([(tail^ live) (Tail tail)])
@@ -2245,20 +2257,16 @@
                         (frame-conflict ,graph
                           (call-live ,call-live ,tail^))))))))])))
     (define Tail
-      (letrec ([make-liveset
-                 (lambda (loc)
-                   (cond [(null? loc) '()]
-                         [else (liveset-cons (car loc) (make-liveset (cdr loc)))]))])
-        (lambda (t)
-          (match t
-            [(if ,cond ,[Tail -> conseq c-l] ,[Tail -> alter a-l])
-             (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
-               (values `(if ,cond^ ,conseq ,alter) live))]
-            [(begin ,effect* ... ,[Tail -> tail live])
-             (let-values ([(eff*^ live^) ((Effect* live) effect*)])
-               (values `(begin ,eff*^ ... ,tail) live^))]
-            [(,triv ,loc* ...)
-             (values t (make-liveset (cons triv loc*)))]))))
+      (lambda (t)
+        (match t
+          [(if ,cond ,[Tail -> conseq c-l] ,[Tail -> alter a-l])
+           (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
+             (values `(if ,cond^ ,conseq ,alter) live))]
+          [(begin ,effect* ... ,[Tail -> tail live])
+           (let-values ([(eff*^ live^) ((Effect* live) effect*)])
+             (values `(begin ,eff*^ ... ,tail) live^))]
+          [(,triv ,loc* ...)
+           (values t (make-liveset (cons triv loc*)))])))
     (define Pred
       (lambda (post-c post-a)
         (lambda (p)
@@ -2278,10 +2286,16 @@
         (lambda (e)
           (match e
             [(nop) (values e post)]
-            [(return-point ,label ,[Tail -> tail live])
-             (set! call-live (union post call-live))
-             (values `(return-point ,label ,(union live post) ,post ,tail)
-               (union live post))] ; todo(?)
+            [(return-point ,label ,preserve ,tail/eff)
+             (if (not preserve)
+                 (let-values ([(tail live) (Tail tail/eff)])
+                   (set! call-live (union post call-live))
+                   (values `(return-point ,label #f ,(union live post) ,post ,tail)
+                           (union live post)))
+                 (let-values ([(eff live) ((Effect post) tail/eff)])
+                   (set! call-live (union `(,return-point) call-live)) ; hack
+                   (values `(return-point ,label #t ,live ,post ,eff)
+                           live)))] ; todo(?)
             [(if ,cond ,[(Effect post) -> conseq c-l] ,[(Effect post) -> alter a-l])
              (let-values ([(cond^ live) ((Pred c-l a-l) cond)])
                (values `(if ,cond^ ,conseq ,alter) live))]
@@ -2303,7 +2317,9 @@
                  (let ([post-rhs (difference post (list v))])
                    (add-conflict-list v (difference post-rhs (list x)))
                    (values e (liveset-cons x post-rhs)))
-                 (values '(nop) post))]))))
+                 (values '(nop) post))]
+            [(,triv ,loc* ...) ; calls that preserves registers
+             (values e (union post (make-liveset (cons triv loc*))))]))))
     (define Effect*
       (lambda (post)
         (lambda (e*)
@@ -2406,7 +2422,7 @@
     (lambda (assign)
       (lambda (e)
         (match e
-          [(return-point ,label ,live ,post ,tail)
+          [(return-point ,label #f ,live ,post ,tail)
            (let* ([fv* (union (filter frame-var? live)
                               (map (lambda (uv) (cadr (assq uv assign)))
                                 (intersection (map car assign) live)))]
@@ -2420,6 +2436,10 @@
                          (return-point ,label ,(ash size align-shift) ,post ,tail)
                          (set! ,frame-pointer-register
                            (- ,frame-pointer-register ,(ash size align-shift))))))]
+          [(return-point ,label #t ,live ,post ,eff)
+           ;; we need homes of live variables
+           ;; now assume that no nfv here
+           `(return-point ,label #t ,live ,post ,eff)]
           [(if ,[(Pred assign) -> cond] ,[(Effect assign) -> conseq] ,[(Effect assign) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect assign) -> effect*] ... ,[(Effect assign) -> effect])
@@ -2476,6 +2496,9 @@
           [(nop) (list 'nop)]
           [(return-point ,label ,size (,[(Var map) -> live*] ...) ,[(Tail map) -> tail])
            `(return-point ,label ,size ,live* ,tail)]
+          [(return-point ,label #t
+             (,[(Var map) -> live*] ...) (,[(Var map) -> post*] ...) ,eff)
+           `(return-point ,label #t ,live* ,post* ,eff)]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset]
              (,op ,[(Triv map) -> e1] ,[(Triv map) -> e2]))
            `(mset! ,base ,offset (,op ,e1 ,e2))]
@@ -2586,6 +2609,8 @@
       (match e
         [(return-point ,label ,size ,live ,[Tail -> tail u])
          (values `(return-point ,label ,size ,live ,tail) u)]
+        [(return-point ,label #t ,live* ,post* ,[Tail -> eff u])
+         (values `(return-point ,label #t ,live* ,post* ,eff) u)]
         [(if ,[Pred -> cond u1] ,[Effect -> conseq u2] ,[Effect -> alter u3])
          (values `(if ,cond ,conseq ,alter)
                  (append u1 u2 u3))]
@@ -2777,7 +2802,11 @@
                              (set-cdr! entry (liveset-cons y (cdr entry)))))
                        (if (uvar? y)
                            (let ([entry (assq y move)])
-                             (set-cdr! entry (liveset-cons x (cdr entry))))))])
+                             (set-cdr! entry (liveset-cons x (cdr entry))))))]
+           [make-liveset
+             (lambda (loc)
+               (cond [(null? loc) '()]
+                     [else (liveset-cons (car loc) (make-liveset (cdr loc)))]))])
     (define Program
       (lambda (p)
         (match-with-default-wrappers p
@@ -2810,18 +2839,14 @@
                       (frame-conflict ,conflict
                         (register-conflict ,graph ,tail))))))])))
     (define Tail
-      (letrec ([make-liveset
-                 (lambda (loc)
-                   (cond [(null? loc) '()]
-                         [else (liveset-cons (car loc) (make-liveset (cdr loc)))]))])
-        (lambda (t)
-          (match t
-            [(if ,cond ,[Tail -> c-l] ,[Tail -> a-l])
-             ((Pred c-l a-l) cond)]
-            [(begin ,effect* ... ,[Tail -> live])
-             ((Effect* live) effect*)]
-            [(,triv ,loc* ...)
-             (make-liveset (cons triv loc*))]))))
+      (lambda (t)
+        (match t
+          [(if ,cond ,[Tail -> c-l] ,[Tail -> a-l])
+           ((Pred c-l a-l) cond)]
+          [(begin ,effect* ... ,[Tail -> live])
+           ((Effect* live) effect*)]
+          [(,triv ,loc* ...)
+           (make-liveset (cons triv loc*))])))
     (define Pred
       (lambda (post-c post-a)
         (lambda (p)
@@ -2841,6 +2866,11 @@
             [(nop) post]
             [(return-point ,label ,size ,live ,[Tail -> t-l])
              (union t-l post)]
+            [(return-point ,label #t ,live* ,post* ,[(Effect post) -> live])
+             (begin
+               (set-car! (cdddr e) (union (filter frame-var? live*) live))
+               (set-car! (cdr (cdddr e)) (union (filter frame-var? post*) post))
+               live)] ; well... I should fix this later
             [(if ,cond ,[(Effect post) -> c-l] ,[(Effect post) -> a-l])
              ((Pred c-l a-l) cond)]
             [(begin ,effect* ... ,[(Effect post) -> live])
@@ -2859,7 +2889,9 @@
              (let ([post-rhs (difference post (list v))])
                (add-conflict-list v (difference post-rhs (list x)))
                (if *iterated-coalescing-enabled* (add-move v x))
-               (liveset-cons x post-rhs))]))))
+               (liveset-cons x post-rhs))]
+            [(,triv ,loc* ...) ; for calls that preserves
+             (union post (make-liveset (cons triv loc*)))]))))
     (define Effect*
       (lambda (post)
         (lambda (e*)
@@ -3195,6 +3227,8 @@
     (lambda (e)
       (match e
         [(return-point ,label ,size ,live ,[Tail -> tail]) `(return-point ,label ,size ,live ,tail)]
+        [(return-point ,label #t ,live* ,post* ,[Tail -> eff])
+         `(return-point ,label #t ,live* ,post* ,eff)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) `(begin ,effect* ... ,effect)]
         [,x x])))
@@ -3238,6 +3272,9 @@
           [(nop) (list 'nop)]
           [(return-point ,label ,size ,live ,[(Tail map) -> tail])
            `(return-point ,label ,size ,live ,tail)]
+          [(return-point ,label #t
+             (,[(Triv map) -> live*] ...) (,[(Triv map) -> post*] ...) ,[(Tail map) -> eff])
+           `(return-point ,label #t ,live* ,post* ,eff)]
           [(mset! ,[(Triv map) -> base] ,[(Triv map) -> offset] ,[(Triv map) -> expr])
            `(mset! ,base ,offset ,expr)]
           [(set! rdx (sign-of rax)) e]
@@ -3258,6 +3295,68 @@
         (if (uvar? v) (cdr (assq v map)) v))))
   (define Triv Var)
   Program)
+
+(define-who save-and-assign-new-frame
+  (define Tail
+    (lambda (t)
+      (match t
+        [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
+         (make-begin `(,effect* ... ,tail))]
+        [,x x])))
+  (define Pred
+    (lambda (p)
+      (match p
+        [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
+         (make-begin `(,effect* ... ,pred))]
+        [,x x])))
+  (define Effect
+    (lambda (e)
+      (match e
+        [(return-point ,label ,size ,live ,tail) e]
+        [(return-point ,label #t ,live ,post ,eff)
+         (let* ([pre-index (map frame-var->index (filter frame-var? live))]
+                [pre-size  (if (null? pre-index) 0 (+ 1 (apply max pre-index)))]
+                [post-reg (difference (filter register? post)
+                            `(,frame-pointer-register
+                              ,allocation-pointer-register
+                              ,@(if *continuation-enabled* (list stack-base-register) '())
+                              ,@(if *collection-enabled* (list end-of-allocation-register) '())))]
+                [offset (ash (+ pre-size (length post-reg)) align-shift)])
+           ;; instruction selection is hard coded
+           (letrec ([gen-save
+                      (lambda (live offset)
+                        (if (null? live) '()
+                            (cons `(mset! ,frame-pointer-register ,offset ,(car live))
+                              (gen-save (cdr live) (+ offset (ash 1 align-shift))))))]
+                    [gen-restore
+                      (lambda (live offset)
+                        (if (null? live) '()
+                            (cons `(set! ,(car live) (mref ,frame-pointer-register ,offset))
+                              (gen-restore (cdr live) (+ offset (ash 1 align-shift))))))]
+                    [gen-num
+                      (lambda (live index)
+                        (if (null? live) '()
+                            (cons (index->frame-var index) (gen-num (cdr live) (+ 1 index)))))])
+             `(begin  ,@(gen-save post-reg (ash pre-size align-shift))
+                     (set! ,frame-pointer-register (+ ,frame-pointer-register ,offset))
+                     (return-point ,label ,offset ,(append (filter frame-var? live)
+                                                     (gen-num post-reg pre-size))
+                       ,eff)
+                     (set! ,frame-pointer-register (- ,frame-pointer-register ,offset))
+                     ,@(gen-restore post-reg (ash pre-size align-shift)))))]
+        [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
+         (make-begin `(,effect* ... ,effect))]
+        [,x x])))
+  (lambda (p)
+    (match-with-default-wrappers p
+      [(letrec ([,label* (lambda () ,[Tail -> body*])] ...) ,[Tail -> body])
+       `(letrec ([,label* (lambda () ,body*)] ...) ,body)])))
 
 (define-who expose-frame-var
   (define Program
@@ -3949,6 +4048,7 @@
     assign-frame)
   discard-call-live
   finalize-locations
+  save-and-assign-new-frame
   expose-frame-var
   expose-basic-blocks
   optimize-jumps
