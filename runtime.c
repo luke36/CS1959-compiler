@@ -16,9 +16,7 @@
 #include <locale.h>
 
 #define stack_size 100000
-
-/* decrease this to stress the GC */
-#define heap_size 100000
+#define heap_size  100000
 
 #ifdef __APPLE__
 #define SCHEME_ENTRY scheme_entry
@@ -48,6 +46,7 @@ static void print(long x);
 
 /* local stack/heap management variables */
 static long pagesize;
+static long original_heapsize;
 static char *heap;
 static char *stack;
 static long heapsize;
@@ -94,6 +93,7 @@ int main(int argc, char *argv[]) {
  /* round stack and heap sizes to even pages */
   stacksize = ((stacksize + pagesize - 1) / pagesize) * pagesize;
   heapsize = ((heapsize + pagesize - 1) / pagesize) * pagesize;
+  original_heapsize = heapsize;
 
   stack = guarded_area(stacksize);
   heap = guarded_area(heapsize);
@@ -628,7 +628,8 @@ static void guard_area(char *addr, long n) {
 
 /* #include <time.h> */
 
-ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
+ ptr collect(ptr **allocation_pointer, ptr **end_of_allocation,
+             void *ra, ptr *top, ptr tagged, char *exceeded_ap) {
   /* struct timespec begin, end; */
   /* clock_gettime(CLOCK_REALTIME, &begin); */
 
@@ -636,6 +637,9 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
   /* n += 1; */
   /* fprintf(stderr, "%d-th garbage collection. asking for %ld extra bytes\n", n, extra); */
   /* fprintf(stderr, "  old heap size: %ld \tbytes\n", heap_end - heap); */
+
+  long tag = TAG(tagged, mask_pair); /* all objects share this tag */
+  long extra = (long)exceeded_ap - UNTAG(tagged, tag);
 
   long new_heapsize = heapsize;
   do
@@ -657,7 +661,7 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
   /* fprintf(stderr, "  live data:     %ld \tbytes\n", used); */
   heapsize = new_heapsize;
   while ((used + extra) <= heapsize / 2 &&
-         heapsize / 2 >= heap_size * sizeof(void *))
+         heapsize / 2 >= original_heapsize * sizeof(void *))
     heapsize /= 2;
   /* fprintf(stderr, "  new heap size: %ld \tbytes\n", heapsize); */
   if (heapsize < new_heapsize) {
@@ -669,11 +673,12 @@ ptr *collect(void *ra, ptr *top, ptr **end_of_allocation, long extra) {
   guard_area((char *)new_heap, heapsize);
 
   heap = (char *)new_heap;
+  *allocation_pointer = (ptr *)((char *)alloc_ptr + extra);
   *end_of_allocation = new_heap_end;
 
   /* clock_gettime(CLOCK_REALTIME, &end); */
   /* long nanosec = (end.tv_sec - begin.tv_sec) * 1e9 + end.tv_nsec - begin.tv_nsec; */
   /* gc_time += nanosec; */
 
-  return alloc_ptr;
+  return (long)alloc_ptr + tag;
 }

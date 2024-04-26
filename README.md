@@ -36,6 +36,7 @@ Comparison (change filename extension to run yscheme):
         closure optimization:          Yes
         pre-optimization:              Yes
         optimize jumps:                Yes
+        optimize allocation:           Yes
 
 ** closure analysis report **
        total closures created:  73
@@ -43,13 +44,13 @@ Comparison (change filename extension to run yscheme):
        average free var:        0.9452054794520548
 
 ** code length report **
-       total code length:    5705
-       average code length:  34.78658536585366
+       total code length:    5188
+       average code length:  31.634146341463413
 (time (test-all-analyze))
-    56 collections
-    0.169742660s elapsed cpu time, including 0.007579784s collecting
-    0.169734244s elapsed real time, including 0.007707961s collecting
-    476153968 bytes allocated, including 472800272 bytes reclaimed
+    57 collections
+    0.164807323s elapsed cpu time, including 0.003457958s collecting
+    0.164815706s elapsed real time, including 0.003596846s collecting
+    478012224 bytes allocated, including 478985232 bytes reclaimed
 ```
 
 ### additional features

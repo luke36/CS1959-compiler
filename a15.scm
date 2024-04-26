@@ -26,6 +26,7 @@
 (define *collection-enabled* #t)
 (define *max-conservative-range* 1024) ; may ask for more space than actually needed
 (define *continuation-enabled* #t)
+(define *optimize-allocation-enabled* #t)
 
 ;; (set! parameter-registers '(r8 r9 rdi rsi))
 (set! allocation-pointer-register 'r11) ; leave rdx for division
@@ -1916,131 +1917,251 @@
       [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
        `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
 
-(define-who insert-overflow-check
+;; improvement possible across if
+(define-who uncover-predictable-allocation
+  (define Body
+    (lambda (b)
+      (match b
+        [(locals (,uvar* ...) ,[Tail -> tail n])
+         `(locals (,uvar* ...) ,(make-begin `((truncate ,n) ,tail)))])))
+  (define Tail
+    (lambda (t)
+      (match t
+        [(if ,[Pred -> cond^ n3] ,[Tail -> conseq n1] ,[Tail -> alter n2])
+         (values `(if ,cond^
+                      ,(make-begin `((truncate ,n1) ,conseq))
+                      ,(make-begin `((truncate ,n2) ,alter))) n3)]
+        [(begin ,eff* ... ,[Tail -> tail n])
+         (let-values ([(eff*^ n^) ((Effect* n) eff*)])
+           (values (make-begin `(,eff*^ ... ,tail)) n^))]
+        [(alloc ,expr ,disp)
+         (if (integer? expr)
+             (values t expr)
+             (values t 0))]
+        [,x (values x 0)])))
+  (define Pred
+    (lambda (p)
+      (match p
+        [(if ,[Pred -> cond^ n3] ,[Pred -> conseq n1] ,[Pred -> alter n2])
+         (values `(if ,cond^
+                      ,(make-begin `((truncate ,n1) ,conseq))
+                      ,(make-begin `((truncate ,n2) ,alter))) n3)]
+        [(begin ,eff* ... ,[Pred -> pred n])
+         (let-values ([(eff*^ n^)  ((Effect* n) eff*)])
+           (values (make-begin `(,eff*^ ... ,pred)) n^))]
+        [,x (values p 0)])))
+  (define Effect
+    (lambda (n)
+      (lambda (e)
+        (match e
+          [(set! ,uvar (alloc ,expr ,disp))
+           (if (integer? expr)
+               (values e (+ n expr))
+               (values e n))]
+          [(mset! ,base ,offset (alloc ,expr ,disp))
+           (if (integer? expr)
+               (values e (+ n expr))
+               (values `(begin ,e (truncate ,n)) 0))]
+          [(set! ,uvar (,proc ,args* ...)) (guard (and (not (binop? proc))
+                                                       (not (eq? proc 'mref))))
+           (values `(begin ,e (truncate ,n)) 0)]
+          [(mset! ,base ,offset (,proc ,args* ...)) (guard (and (not (binop? proc))
+                                                                (not (eq? proc 'mref))))
+           (values `(begin ,e (truncate ,n)) 0)]
+          [(if ,[Pred -> cond^ n3] ,[(Effect 0) -> conseq n1] ,[(Effect 0) -> alter n2])
+           (values (make-begin `((if ,cond^
+                                     ,(make-begin `((truncate ,n1) ,conseq))
+                                     ,(make-begin `((truncate ,n2) ,alter)))
+                                 (truncate ,n))) n3)]
+          [(begin ,eff* ... ,[(Effect n) -> eff n])
+           (let-values ([(eff*^ n^) ((Effect* n) eff*)])
+             (values (make-begin `(,eff*^ ... ,eff)) n^))]
+          [(,proc ,arg* ...) (guard (and (not (eq? proc 'set!))
+                                         (not (eq? proc 'mset!))
+                                         (not (eq? proc 'nop))))
+           (values `(begin ,e (truncate ,n)) 0)]
+          [,x (values x n)]))))
+  (define Effect*
+    (lambda (n)
+      (lambda (e*)
+        (if (null? e*)
+            (values '() n)
+            (let*-values ([(d n^) ((Effect* n) (cdr e*))]
+                          [(a n^^) ((Effect n^) (car e*))])
+              (values (cons a d) n^^))))))
+  (lambda (p)
+    (if *optimize-allocation-enabled*
+        (match-with-default-wrappers p
+          [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
+           `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])
+        p)))
+
+(define-who optimize-allocation
   (define new-local*)
-  (define collect-label)
-  (define wrap-with
-    (lambda (expr x)
-      (let ([tmp (unique-name 't)])
-        (set! new-local* (cons tmp new-local*))
-        (if (and (number? x) (= x 0))
-            expr
-            (let ([inc
-                    (match x
-                      [(,[e*] ...) (apply append e*)]
-                      [0 '()]
-                      [,x `((set! ,tmp (+ ,tmp ,x)))])])
-              (make-nopless-begin
-                `((set! ,tmp ,allocation-pointer-register)
-                  ,@inc
-                  (if (> ,tmp ,end-of-allocation-register)
-                      (begin
-                        (set! ,tmp (- ,tmp ,allocation-pointer-register))
-                        (,collect-label ,tmp))
-                      (nop))
-                  ,expr)))))))
   (define Body
     (lambda (b)
       (match b
         [(locals (,uvar* ...) ,tail)
-         (set! new-local* '())
-         (let-values ([(tail^ l h) (Tail tail)])
-           `(locals (,uvar* ... ,new-local* ...)
-              ,(wrap-with tail^ h)))])))
+         (begin
+           (set! new-local* '())
+           (let ([tail^ (Tail #f 0 tail)])
+             `(locals (,uvar* ... ,new-local* ...) ,tail^)))])))
+  (define Tail
+    (lambda (xp i t)
+      (match t
+        [(if ,cond ,conseq ,alter)
+         (let*-values ([(cond^ xp^ i^) (Pred xp i cond)]
+                       [(conseq^) (Tail xp^ i^ conseq)]
+                       [(alter^) (Tail xp^ i^ alter)])
+           `(if ,cond^ ,conseq^ ,alter^))]
+        [(begin ,eff* ... ,tail)
+         (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
+                       [(tail^) (Tail xp^ i^ tail)])
+           (make-nopless-begin `(,eff*^ ... ,tail^)))]
+        [(alloc ,expr ,disp) (guard (integer? expr))
+         (cond [(not xp) t]
+               [else `(+ ,xp ,(+ i disp))])]
+        [,x x])))
+  (define Pred
+    (lambda (xp i p)
+      (match p
+        [(if ,cond ,conseq ,alter)
+         (let*-values ([(cond^ xp^ i^) (Pred xp i cond)]
+                       [(conseq^ xp^^ i^^) (Pred xp^ i^ conseq)]
+                       [(alter^ xp^^ i^^) (Pred xp^ i^ alter)])
+           (values `(if ,cond^ ,conseq^ ,alter^) xp^^ i^^))]
+        [(begin ,eff* ... ,pred)
+         (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
+                       [(pred^ xp^^ i^^) (Pred xp^ i^ pred)])
+           (values (make-nopless-begin `(,eff*^ ... ,pred^)) xp^^ i^^))]
+        [,x (values p xp i)])))
+  (define Effect
+    (lambda (xp i e)
+      (match e
+        [(set! ,uvar (alloc ,expr ,disp)) (guard (integer? expr))
+         (cond [(not xp)
+                (let ([xp (unique-name 'xp)])
+                  (set! new-local* (cons xp new-local*))
+                  (values `(begin (set! ,xp (alloc ,i ,disp))
+                                  (set! ,uvar ,xp))
+                          xp (- expr disp)))]
+               [else
+                 (values `(set! ,uvar
+                            ,(if (zero? (+ i disp))
+                                 xp
+                                 `(+ ,xp ,(+ i disp))))
+                         xp (+ i expr))])]
+        [(mset! ,base ,offset (alloc ,expr ,disp)) (guard (integer? expr))
+         (cond [(not xp)
+                (let ([xp (unique-name 'xp)])
+                  (set! new-local* (cons xp new-local*))
+                  (values `(begin (set! ,xp (alloc ,i ,disp))
+                                  (mset! ,base ,offset ,xp))
+                          xp (- expr disp)))]
+               [else
+                 (values `(mset! ,base ,offset
+                            ,(if (zero? (+ i disp))
+                                 xp
+                                 `(+ ,xp ,(+ i disp))))
+                         xp (+ i expr))])]
+        [(truncate ,n)
+         (values '(nop) #f n)]
+        [(if ,cond ,conseq ,alter)
+         (let*-values ([(cond^ xp^ i^) (Pred xp i cond)]
+                       [(conseq^ xp^^ i^^) (Effect xp^ i^ conseq)]
+                       [(alter^ xp^^ i^^) (Effect xp^ i^ alter)])
+           (values `(if ,cond^ ,conseq^ ,alter^) xp^^ i^^))]
+        [(begin ,eff* ... ,eff)
+         (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
+                       [(eff^ xp^^ i^^) (Effect xp^ i^ eff)])
+           (values (make-nopless-begin `(,eff*^ ... ,eff^)) xp^^ i^^))]
+        [,x (values x xp i)])))
+  (define Effect*
+    (lambda (xp i e*)
+      (if (null? e*)
+          (values '() xp i)
+          (let*-values ([(a xp^ i^) (Effect xp i (car e*))]
+                        [(d xp^^ i^^) (Effect* xp^ i^ (cdr e*))])
+            (values (cons a d) xp^^ i^^)))))
+  (lambda (p)
+    (if *optimize-allocation-enabled*
+        (match-with-default-wrappers p
+          [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
+           `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])
+        p)))
+
+(define-who expose-allocation-pointer
+  (define collect-label)
+  (define Body
+    (lambda (b)
+      (match b
+        [(locals (,uvar* ...) ,[Tail -> tail])
+         `(locals (,uvar* ...) ,tail)])))
   (define Tail
     (lambda (t)
       (match t
-        [(if ,cond ,[Tail -> conseq l1 h1] ,[Tail -> alter l2 h2])
-         (if (or (not *max-conservative-range*)
-                 (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
-             (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
-               (values `(if ,cond^ ,conseq ,alter) l h))
-             (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
-               (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
-        [(begin ,eff* ... ,[Tail -> tail l h])
-         (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
-           (values (make-begin `(,eff*^ ... ,tail)) l^ h^))]
+        [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
+         (make-begin `(,effect* ... ,tail))]
         [(alloc ,expr ,disp)
-         (if (number? expr)
-             (values t expr expr)
-             (values (wrap-with t expr) 0 0))]
-        [,x (values x 0 0)])))
+         (let ([rv (unique-name 'rv)])
+           `(begin (set! ,rv (+ ,allocation-pointer-register ,disp))
+                   (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr))
+                   ,@(if *collection-enabled*
+                         `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
+                               (nop)
+                               (set! ,rv (,collect-label ,uvar))))
+                         '())
+                   rv))]
+        [,x x])))
   (define Pred
-    (lambda (c-low c-high a-low a-high)
-      (lambda (p)
-        (match p
-          [(true) (values p c-low c-high)]
-          [(false) (values p a-low a-high)]
-          [(if ,cond
-               ,[(Pred c-low c-high a-low a-high) -> conseq l1 h1]
-               ,[(Pred c-low c-high a-low a-high) -> alter l2 h2])
-           (if (or (not *max-conservative-range*)
-                   (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
-               (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
-                 (values `(if ,cond^ ,conseq ,alter) l h))
-               (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
-                 (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
-          [(begin ,eff* ... ,[(Pred c-low c-high a-low a-high) -> pred l h])
-           (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
-             (values (make-begin `(,eff*^ ... ,pred)) l^ h^))]
-          [,x (values x (min c-low a-low) (max c-high a-high))]))))
+    (lambda (p)
+      (match p
+        [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
+         (make-begin `(,effect* ... ,pred))]
+        [,x x])))
   (define Effect
-    (lambda (low high)
-      (lambda (e)
-        (match e
-          [(set! ,uvar (alloc ,expr ,disp))
-           (if (number? expr)
-               (values e (+ low expr) (+ high expr))
-               (values (wrap-with e (list expr high)) 0 0))]
-          [(mset! ,base ,offset (alloc ,expr ,disp))
-           (if (number? expr)
-               (values e (+ low expr) (+ high expr))
-               (values (wrap-with e (list expr high)) 0 0))]
-          [(set! ,uvar (,proc ,args* ...)) (guard (and (not (binop? proc))
-                                                       (not (eq? proc 'mref))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
-          [(mset! ,base ,offset (,proc ,args* ...)) (guard (and (not (binop? proc))
-                                                                (not (eq? proc 'mref))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
-          [(,proc ,arg* ...) (guard (and (not (eq? proc 'set!))
-                                         (not (eq? proc 'mset!))
-                                         (not (eq? proc 'nop))))
-           (values (make-nopless-begin `(,e ,(wrap-with '(nop) high))) 0 0)]
-          [(if ,cond ,[(Effect low high) -> conseq l1 h1] ,[(Effect low high) -> alter l2 h2])
-           (if (or (not *max-conservative-range*)
-                   (< (- (max h1 h2) (min l1 l2)) *max-conservative-range*))
-               (let-values ([(cond^ l h) ((Pred l1 h1 l2 h2) cond)])
-                 (values `(if ,cond^ ,conseq ,alter) l h))
-               (let-values ([(cond^ l3 h3) ((Pred 0 0 0 0) cond)])
-                 (values `(if ,cond^ ,(wrap-with conseq h1) ,(wrap-with alter h2)) l3 h3)))]
-          [(begin ,eff* ... ,[(Effect low high) -> eff l h])
-           (let-values ([(eff*^ l^ h^) ((Effect* l h) eff*)])
-             (values (make-begin `(,eff*^ ... ,eff)) l^ h^))]
-          [,x (values x low high)]))))
-  (define Effect*
-    (lambda (low high)
-      (lambda (e*)
-        (if (null? e*)
-            (values '() low high)
-            (let*-values ([(d l h) ((Effect* low high) (cdr e*))]
-                          [(a l^ h^) ((Effect l h) (car e*))])
-              (values (cons a d) l^ h^))))))
+    (lambda (e)
+      (match e
+        [(set! ,uvar (alloc ,expr ,disp))
+         `(begin (set! ,uvar (+ ,allocation-pointer-register ,disp))
+                 (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr))
+                 ,@(if *collection-enabled*
+                       `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
+                             (nop)
+                             (set! ,uvar (,collect-label ,uvar))))
+                       '()))]
+        [(mset! ,base ,offset (alloc ,expr ,disp))
+         `(begin (mset! ,base ,offset (+ ,allocation-pointer-register ,disp))
+                 (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr))
+                 ,@(if *collection-enabled*
+                       `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
+                             (nop)
+                             (mset! ,base ,offset (,collect-label ,uvar))))
+                       '()))]
+        [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
+         `(if ,cond ,conseq ,alter)]
+        [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
+         (make-begin `(,effect* ... ,effect))]
+        [,x x])))
   (lambda (p)
-    (if *collection-enabled*
-        (begin
-          (set! collect-label (unique-label 'collect))
-          (match p
-            [(with-label-alias (,label-alias* ...)
-               (with-global-data ,data
-                 (with-closure-length ,closure-length
-                   (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
-             `(with-label-alias ([,collect-label "_scheme_collect"]
-                                 ,label-alias* ...)
-                (with-global-data ,data
-                  (with-closure-length ,closure-length
-                    (with-collect-label ,collect-label
-                      (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)))))]))
-        p)))
+    (when *collection-enabled*
+      (set! collect-label (unique-label 'collect)))
+    (match p
+      [(with-label-alias (,label-alias* ...)
+         (with-global-data ,data
+           (with-closure-length ,closure-length
+             (letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body]))))
+       `(with-label-alias ,(if *collection-enabled*
+                               `([,collect-label "_scheme_collect"] ,label-alias* ...)
+                               `(,label-alias* ...))
+          (with-global-data ,data
+            (with-closure-length ,closure-length
+              (with-collect-label ,collect-label
+                (letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)))))])))
 
 (define-who impose-calling-conventions
   (define new-frames)
@@ -2166,51 +2287,6 @@
          (set! collect-label cl)
          (let ([body*^ (map (lambda (p b) ((Body p) b)) uvar* body*)])
            `(letrec ([,label* (lambda () ,body*^)] ...) ,body)))])))
-
-(define-who expose-allocation-pointer
-  (define Body
-    (lambda (b)
-      (match b
-        [(locals (,uvar* ...)
-           (with-return-point ,rp
-             (new-frames (,nfv* ...) ,[Tail -> tail])))
-         `(locals (,uvar* ...)
-            (with-return-point ,rp
-              (new-frames (,nfv* ...) ,tail)))])))
-  (define Tail
-    (lambda (t)
-      (match t
-        [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
-         (make-begin `(,effect* ... ,tail))]
-        [,x x])))
-  (define Pred
-    (lambda (p)
-      (match p
-        [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
-         (make-begin `(,effect* ... ,pred))]
-        [,x x])))
-  (define Effect
-    (lambda (e)
-      (match e
-        [(set! ,uvar (alloc ,expr ,disp))
-         `(begin (set! ,uvar (+ ,allocation-pointer-register ,disp))
-                 (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
-        [(mset! ,base ,offset (alloc ,expr ,disp))
-         `(begin (mset! ,base ,offset (+ ,allocation-pointer-register ,disp))
-                 (set! ,allocation-pointer-register (+ ,allocation-pointer-register ,expr)))]
-        [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
-         `(if ,cond ,conseq ,alter)]
-        [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
-         (make-begin `(,effect* ... ,effect))]
-        [,x x])))
-  (lambda (p)
-    (match-with-default-wrappers p
-      [(letrec ([,label* (lambda (,uvar* ...) ,[Body -> body*])] ...) ,[Body -> body])
-       `(letrec ([,label* (lambda (,uvar* ...) ,body*)] ...) ,body)])))
 
 (define uncover-frame-conflict
   (letrec ([graph #f]
@@ -2870,6 +2946,7 @@
              (begin
                (set-car! (cdddr e) (union (filter frame-var? live*) live))
                (set-car! (cdr (cdddr e)) (union (filter frame-var? post*) post))
+               (add-conflict-list 'rax post)
                live)] ; well... I should fix this later
             [(if ,cond ,[(Effect post) -> c-l] ,[(Effect post) -> a-l])
              ((Pred c-l a-l) cond)]
@@ -3323,6 +3400,7 @@
                 [post-reg (difference (filter register? post)
                             `(,frame-pointer-register
                               ,allocation-pointer-register
+                              ,return-value-register
                               ,@(if *continuation-enabled* (list stack-base-register) '())
                               ,@(if *collection-enabled* (list end-of-allocation-register) '())))]
                 [offset (ash (+ pre-size (length post-reg)) align-shift)])
@@ -3741,7 +3819,8 @@
         iterated register coalescing:  ~a
         closure optimization:          ~a
         pre-optimization:              ~a
-        optimize jumps:                ~a\n\n"
+        optimize jumps:                ~a
+        optimize allocation:           ~a\n\n"
               *standard*
               (bool->word *collection-enabled*)
               (bool->word *continuation-enabled*)
@@ -3749,7 +3828,8 @@
               (bool->word *iterated-coalescing-enabled*)
               (bool->word *closure-optimization-enabled*)
               (bool->word *cp-1-enabled*)
-              (bool->word *optimize-jumps-enabled*))
+              (bool->word *optimize-jumps-enabled*)
+              (bool->word *optimize-allocation-enabled*))
       (printf "** closure analysis report **
        total closures created:  ~a
        total free var:          ~a
@@ -4033,9 +4113,10 @@
   verify-uil
   remove-complex-opera*
   flatten-set!
-  insert-overflow-check
-  impose-calling-conventions
+  uncover-predictable-allocation
+  optimize-allocation
   expose-allocation-pointer
+  impose-calling-conventions
   uncover-frame-conflict
   pre-assign-frame
   assign-new-frame

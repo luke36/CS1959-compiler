@@ -153,13 +153,14 @@ IC_RETURN:
 
     .globl _scheme_collect
 _scheme_collect:
-    movq %r8, %rcx
-    movq %r15, %rdi
-    movq %rbp, %rsi
-    leaq 0(%rbp), %rdx
+    leaq 0(%rbp), %rdi
+    leaq 8(%rbp), %rsi
+    movq %r15, %rdx
+    movq %rbp, %rcx
+    movq %r11, %r9
     call collect
-    movq %rax, %r11
-    movq 0(%rbp), %r13
+    movq 0(%rbp), %r11
+    movq 8(%rbp), %r13
     jmp *%r15
 
     .globl _scheme_inspect
