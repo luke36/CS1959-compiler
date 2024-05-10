@@ -1,21 +1,18 @@
 ;; todo: * use SCCs in purify-letrec, and assimilate elsewhere;
-;;       * in chez raw data are wrapped in a `raw' form; but here it's an overkill
-;;       * remove useless set!
-;;       * how to trace globals (more) precisely?
-;;         A: no you can't do so with minimal effort (live masks should work?)
+;;       * lift procedures and lift to global
+;;         how to trace globals (more) precisely?
+;;         You can use record referred globals mixed with code. You might take
+;;         a look at https://simonmar.github.io/posts/2018-06-22-New-SRTs.html
+;;         or inspect chez source code. Chez maintains a symbol table for code
+;;         objects for relocation, so that might be a different story.
 ;;       * utilize more addressing modes (for vector)
-
-(eval-when (compile load eval)
-  (optimize-level 2)
-  (case-sensitive #t)
-)
+;;       * use disp- and index-operand earlier, and adjust (among others)
+;;         instruction selection accordingly
 
 (load "match.scm")
 (load "helpers.scm")
 (load "driver.scm")
 (load "fmts.pretty")
-
-(game-eval compile)
 
 (define *standard* 'r6rs)
 (define *cp-1-enabled* #t) ; better set to #f when testing trivial cases
@@ -4141,7 +4138,7 @@
 (load "a15-wrapper.scm")
 (load "tests15.scm")
 (load "tests15-extra.scm")
-
+(game-eval compile)
 (trusted-passes #t)
 
 #;
