@@ -628,8 +628,8 @@ static void guard_area(char *addr, long n) {
 
 /* #include <time.h> */
 
- ptr collect(ptr **allocation_pointer, ptr **end_of_allocation,
-             void *ra, ptr *top, ptr tagged, char *exceeded_ap) {
+ptr collect(ptr **allocation_pointer, ptr **end_of_allocation,
+            void *ra, ptr *top, ptr tagged, char *exceeded_ap) {
   /* struct timespec begin, end; */
   /* clock_gettime(CLOCK_REALTIME, &begin); */
 

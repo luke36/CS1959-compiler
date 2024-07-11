@@ -114,12 +114,12 @@
       [<= '>=])))
 
 (define lambda?
-    (lambda (x)
-      (and (pair? x) (eq? (car x) 'lambda))))
+  (lambda (x)
+    (and (pair? x) (eq? (car x) 'lambda))))
 
 (define trivial?
-    (lambda (v)
-      (or (uvar? v) (label? v) (integer? v))))
+  (lambda (v)
+    (or (uvar? v) (label? v) (integer? v))))
 
 (define (make-nopless-begin x*)
   (let ([x* (remove '(nop) x*)])
@@ -1810,6 +1810,7 @@
       (match t
         [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail]) (make-begin `(,effect* ... ,tail))]
+        [(pariah ,[Tail -> t]) `(pariah ,t)]
         [(,rator ,[Value -> rand1] ,[Value -> rand2]) (guard (binop? rator))
          (remove-opera rator rand1 rand2)]
         [(alloc ,[Value -> expr] ,disp) (remove-opera 'alloc expr disp)]
@@ -1822,6 +1823,7 @@
       (match p
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) (make-begin `(,effect* ... ,pred))]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [(,rel ,[Value -> rand1] ,[Value -> rand2]) (remove-opera rel rand1 rand2)]
         [,x x])))
   (define Effect
@@ -1836,12 +1838,14 @@
         [(set! ,v ,[Value -> x]) `(set! ,v ,x)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [(,[Value -> proc] ,[Value -> arg*] ...) (process-procedure-call proc arg*)])))
   (define Value
     (lambda (v)
       (match v
         [(if ,[Pred -> cond] ,[Value -> conseq] ,[Value -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Value -> triv]) (make-begin `(,effect* ... ,triv))]
+        [(pariah ,[Value -> e]) `(pariah ,e)]
         [(,rator ,[Value -> rand1] ,[Value -> rand2]) (guard (binop? rator))
          (remove-opera rator rand1 rand2)]
         [(alloc ,[Value -> expr] ,disp) (remove-opera 'alloc expr disp)]
@@ -1864,6 +1868,7 @@
               ,(do-flatten-set! uvar alter))]
         [(begin ,effect* ... ,value)
          (make-begin `(,effect* ... ,(do-flatten-set! uvar value)))]
+        [(pariah ,value) `(pariah ,(do-flatten-set! uvar value))]
         [,x `(set! ,uvar ,value)])))
   (define do-flatten-mset!
     (lambda (base offset value)
@@ -1874,6 +1879,7 @@
               ,(do-flatten-mset! base offset alter))]
         [(begin ,effect* ... ,value)
          (make-begin `(,effect* ... ,(do-flatten-mset! base offset value)))]
+        [(pariah ,value) `(pariah ,(do-flatten-mset! base offset value))]
         [,x `(mset! ,base ,offset ,value)])))
   (define Body
     (lambda (b)
@@ -1885,12 +1891,14 @@
       (match t
         [(if ,[Pred -> cond] ,[Tail -> conseq] ,[Tail -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail]) (make-begin `(,effect* ... ,tail))]
+        [(pariah ,[Tail -> t]) `(pariah ,t)]
         [,x x])))
   (define Pred
     (lambda (p)
       (match p
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) (make-begin `(,effect* ... ,pred))]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -1902,12 +1910,14 @@
          (do-flatten-mset! base offset value)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [,x x])))
   (define Value
     (lambda (v)
       (match v
         [(if ,[Pred -> cond] ,[Value -> conseq] ,[Value -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Value -> value]) (make-begin `(,effect* ... ,value))]
+        [(pariah ,[Value -> v]) `(pariah ,v)]
         [,x x])))
   (lambda (p)
     (match-with-default-wrappers p
@@ -1931,6 +1941,7 @@
         [(begin ,eff* ... ,[Tail -> tail n])
          (let-values ([(eff*^ n^) ((Effect* n) eff*)])
            (values (make-begin `(,eff*^ ... ,tail)) n^))]
+        [(pariah ,[Tail -> t n]) (values `(pariah ,t) n)]
         [(alloc ,expr ,disp)
          (if (integer? expr)
              (values t expr)
@@ -1946,6 +1957,7 @@
         [(begin ,eff* ... ,[Pred -> pred n])
          (let-values ([(eff*^ n^)  ((Effect* n) eff*)])
            (values (make-begin `(,eff*^ ... ,pred)) n^))]
+        [(pariah ,[Pred -> p n]) (values `(pariah ,p) n)]
         [,x (values p 0)])))
   (define Effect
     (lambda (n)
@@ -1973,6 +1985,7 @@
           [(begin ,eff* ... ,[(Effect n) -> eff n])
            (let-values ([(eff*^ n^) ((Effect* n) eff*)])
              (values (make-begin `(,eff*^ ... ,eff)) n^))]
+          [(pariah ,[(Effect n) -> e n1]) (values `(pariah ,e) n1)]
           [(,proc ,arg* ...) (guard (and (not (eq? proc 'set!))
                                          (not (eq? proc 'mset!))
                                          (not (eq? proc 'nop))))
@@ -2015,6 +2028,7 @@
          (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
                        [(tail^) (Tail xp^ i^ tail)])
            (make-nopless-begin `(,eff*^ ... ,tail^)))]
+        [(pariah ,[(Tail xp i t) -> tail]) `(pariah ,tail)]
         [(alloc ,expr ,disp) (guard (integer? expr))
          (cond [(not xp) t]
                [else `(+ ,xp ,(+ i disp))])]
@@ -2031,6 +2045,7 @@
          (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
                        [(pred^ xp^^ i^^) (Pred xp^ i^ pred)])
            (values (make-nopless-begin `(,eff*^ ... ,pred^)) xp^^ i^^))]
+        [(pariah ,[(Pred xp i t) -> pred]) `(pariah ,pred)]
         [,x (values p xp i)])))
   (define Effect
     (lambda (xp i e)
@@ -2072,6 +2087,7 @@
          (let*-values ([(eff*^ xp^ i^) (Effect* xp i eff*)]
                        [(eff^ xp^^ i^^) (Effect xp^ i^ eff)])
            (values (make-nopless-begin `(,eff*^ ... ,eff^)) xp^^ i^^))]
+        [(pariah ,[(Effect xp i t) -> e]) `(pariah ,e)]
         [,x (values x xp i)])))
   (define Effect*
     (lambda (xp i e*)
@@ -2101,6 +2117,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
          (make-begin `(,effect* ... ,tail))]
+        [(pariah ,[Tail -> t]) `(pariah ,t)]
         [(alloc ,expr ,disp)
          (let ([rv (unique-name 'rv)])
            `(begin (set! ,rv (+ ,allocation-pointer-register ,disp))
@@ -2108,7 +2125,7 @@
                    ,@(if *collection-enabled*
                          `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
                                (nop)
-                               (set! ,rv (,collect-label ,uvar))))
+                               (pariah (set! ,rv (,collect-label ,uvar)))))
                          '())
                    rv))]
         [,x x])))
@@ -2119,6 +2136,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
          (make-begin `(,effect* ... ,pred))]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -2129,7 +2147,7 @@
                  ,@(if *collection-enabled*
                        `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
                              (nop)
-                             (set! ,uvar (,collect-label ,uvar))))
+                             (pariah (set! ,uvar (,collect-label ,uvar)))))
                        '()))]
         [(mset! ,base ,offset (alloc ,expr ,disp))
          `(begin (mset! ,base ,offset (+ ,allocation-pointer-register ,disp))
@@ -2137,12 +2155,13 @@
                  ,@(if *collection-enabled*
                        `((if (<= ,allocation-pointer-register ,end-of-allocation-register)
                              (nop)
-                             (mset! ,base ,offset (,collect-label ,uvar))))
+                             (pariah (mset! ,base ,offset (,collect-label ,uvar)))))
                        '()))]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter])
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
          (make-begin `(,effect* ... ,effect))]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [,x x])))
   (lambda (p)
     (when *collection-enabled*
@@ -2208,6 +2227,7 @@
           [(if ,[Pred -> cond] ,[(Tail rp) -> conseq] ,[(Tail rp) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[Effect -> effect*] ... ,[(Tail rp) -> tail]) (make-begin `(,effect* ... ,tail))]
+          [(pariah ,[(Tail rp) -> t]) `(pariah ,t)]
           [(,proc ,rand* ...) (guard (not (binop? proc))
                                 (not (eq? proc 'mref))
                                 (not (eq? proc 'alloc)))
@@ -2237,12 +2257,14 @@
       (match p
         [(if ,[Pred -> cond] ,[Pred -> conseq]  ,[Pred -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) (make-begin `(,effect* ... ,pred))]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [,x x])))
   (define Effect
     (lambda (e)
       (match e
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) (make-begin `(,effect* ... ,effect))]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [(,proc ,args* ...) (guard (and (not (eq? proc 'set!))
                                         (not (eq? proc 'nop))
                                         (not (eq? proc 'mset!))))
@@ -2338,6 +2360,7 @@
           [(begin ,effect* ... ,[Tail -> tail live])
            (let-values ([(eff*^ live^) ((Effect* live) effect*)])
              (values `(begin ,eff*^ ... ,tail) live^))]
+          [(pariah ,[Tail -> t l]) (values `(pariah ,t) l)]
           [(,triv ,loc* ...)
            (values t (make-liveset (cons triv loc*)))])))
     (define Pred
@@ -2352,6 +2375,7 @@
             [(begin ,effect* ... ,[(Pred post-c post-a) -> pred live])
              (let-values ([(eff*^ live^) ((Effect* live) effect*)])
                (values `(begin ,eff*^ ... ,pred) live^))]
+            [(pariah ,[(Pred post-c post-a) -> p l]) (values `(pariah ,p) l)]
             [(,rel ,x ,y)
              (values p (liveset-cons x (liveset-cons y (union post-c post-a))))]))))
     (define Effect
@@ -2375,6 +2399,7 @@
             [(begin ,effect* ... ,[(Effect post) -> effect live])
              (let-values ([(effect*^ live^) ((Effect* live) effect*)])
                (values `(begin ,effect*^ ... ,effect) live^))]
+            [(pariah ,[(Effect post) -> e l]) (values `(pariah ,e) l)]
             [(mset! ,base ,offset (,rator ,x ,y))
              (values e (liveset-cons base (liveset-cons offset (liveset-cons x (liveset-cons y post)))))]
             [(mset! ,base ,offset ,expr)
@@ -2481,6 +2506,7 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect assign) -> effect*] ... ,[(Tail assign) -> tail])
            (make-begin `(,effect* ... ,tail))]
+          [(pariah ,[(Tail assign) -> t]) `(pariah ,t)]
           [,x x]))))
   (define Pred
     (lambda (assign)
@@ -2490,6 +2516,7 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect assign) -> effect*] ... ,[(Pred assign) -> pred])
            (make-begin `(,effect* ... ,pred))]
+          [(pariah ,[(Pred assign) -> p]) `(pariah ,p)]
           [,x x]))))
   (define Effect
     (lambda (assign)
@@ -2517,6 +2544,7 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect assign) -> effect*] ... ,[(Effect assign) -> effect])
            (make-begin `(,effect* ... ,effect))]
+          [(pariah ,[(Effect assign) -> e]) `(pariah ,e)]
           [,x x]))))
   (lambda (p)
     (match-with-default-wrappers p
@@ -2549,6 +2577,7 @@
            `(if ,pred ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Tail map) -> tail])
            `(begin ,effect* ... ,tail)]
+          [(pariah ,[(Tail map) -> t]) `(pariah ,t)]
           [(,[(Triv map) -> triv] ,[(Triv map) -> loc*] ...)
            `(,triv ,loc* ...)]))))
   (define Pred
@@ -2559,6 +2588,7 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Pred map) -> pred])
            `(begin ,effect* ... ,pred)]
+          [(pariah ,[(Pred map) -> p]) `(pariah ,p)]
           [(,rel ,[(Triv map) -> left] ,[(Triv map) -> right])
            `(,rel ,left ,right)]
           [,x x]))))
@@ -2588,7 +2618,8 @@
           [(if ,[(Pred map) -> cond] ,[(Effect map) -> conseq] ,[(Effect map) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Effect map) -> effect])
-           `(begin ,effect* ... ,effect)]))))
+           `(begin ,effect* ... ,effect)]
+          [(pariah ,[(Effect map) -> e]) `(pariah ,e)]))))
   (define Var
     (lambda (map)
       (lambda (v)
@@ -2638,6 +2669,7 @@
         [(begin ,[Effect -> effect* u*] ... ,[Tail -> tail u])
          (values (make-begin `(,effect* ... ,tail))
            (apply append u u*))]
+        [(pariah ,[Tail -> t u]) (values `(pariah ,t) u)]
         [(,triv ,loc* ...)
          (if (integer? triv)
              (let ([temp (unique-name 'u)])
@@ -2653,6 +2685,7 @@
         [(begin ,[Effect -> effect* u*] ... ,[Pred -> pred u])
          (values (make-begin `(,effect* ... ,pred))
                  (apply append u u*))]
+        [(pariah ,[Pred -> p u]) (values `(pariah ,p) u)]
         [(,rel ,x ,y)
          (cond [(and (frame-var? x) (frame-var? y))
                 (let ([temp (unique-name 'u)])
@@ -2690,6 +2723,7 @@
         [(begin ,[Effect -> effect* u*] ... ,[Effect -> effect u])
          (values (make-begin `(,effect* ... ,effect))
                  (apply append u u*))]
+        [(pariah ,[Effect -> e u]) (values `(pariah ,e) u)]
         [(nop) (values '(nop) '())]
         [(mset! ,base ,offset ,expr)
          (cond [(not (very-trivial? expr))
@@ -2918,6 +2952,7 @@
            ((Pred c-l a-l) cond)]
           [(begin ,effect* ... ,[Tail -> live])
            ((Effect* live) effect*)]
+          [(pariah ,[Tail -> l]) l]
           [(,triv ,loc* ...)
            (make-liveset (cons triv loc*))])))
     (define Pred
@@ -2930,6 +2965,7 @@
              ((Pred c-l a-l) cond)]
             [(begin ,effect* ... ,[(Pred post-c post-a) -> live])
              ((Effect* live) effect*)]
+            [(pariah ,[(Pred post-c post-a) -> l]) l]
             [(,rel ,x ,y)
              (liveset-cons x (liveset-cons y (union post-a post-c)))]))))
     (define Effect
@@ -2949,6 +2985,7 @@
              ((Pred c-l a-l) cond)]
             [(begin ,effect* ... ,[(Effect post) -> live])
              ((Effect* live) effect*)]
+            [(pariah ,[(Effect post) -> l]) l]
             [(mset! ,base ,offset ,expr)
              (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
             [(set! rdx (sign-of rax))
@@ -3289,6 +3326,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
          `(begin ,effect* ... ,tail)]
+        [(pariah ,[Tail -> t]) `(pariah ,t)]
         [(,triv ,loc* ...)
          (list triv)])))
   (define Pred
@@ -3296,6 +3334,7 @@
       (match p
         [(if ,[Pred -> cond] ,[Pred -> conseq] ,[Pred -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred]) `(begin ,effect* ... ,pred)]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -3305,6 +3344,7 @@
          `(return-point ,label #t ,live* ,post* ,eff)]
         [(if ,[Pred -> cond] ,[Effect -> conseq] ,[Effect -> alter]) `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect]) `(begin ,effect* ... ,effect)]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [,x x])))
   Program)
 
@@ -3327,6 +3367,7 @@
            `(if ,pred ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Tail map) -> tail])
            `(begin ,effect* ... ,tail)]
+          [(pariah ,[(Tail map) -> t]) `(pariah ,t)]
           [(,[(Triv map) -> triv]) (list triv)]))))
   (define Pred
     (lambda (map)
@@ -3336,6 +3377,7 @@
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Pred map) -> pred])
            `(begin ,effect* ... ,pred)]
+          [(pariah ,[(Pred map) -> p]) `(pariah ,p)]
           [(,rel ,[(Triv map) -> left] ,[(Triv map) -> right])
            `(,rel ,left ,right)]
           [,x x]))))
@@ -3362,7 +3404,8 @@
           [(if ,[(Pred map) -> cond] ,[(Effect map) -> conseq] ,[(Effect map) -> alter])
            `(if ,cond ,conseq ,alter)]
           [(begin ,[(Effect map) -> effect*] ... ,[(Effect map) -> effect])
-           `(begin ,effect* ... ,effect)]))))
+           `(begin ,effect* ... ,effect)]
+          [(pariah ,[(Effect map) -> e]) `(pariah ,e)]))))
   (define Var
     (lambda (map)
       (lambda (v)
@@ -3378,6 +3421,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Tail -> tail])
          (make-begin `(,effect* ... ,tail))]
+        [(pariah ,[Tail -> t]) `(pariah ,t)]
         [,x x])))
   (define Pred
     (lambda (p)
@@ -3386,6 +3430,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Pred -> pred])
          (make-begin `(,effect* ... ,pred))]
+        [(pariah ,[Pred -> p]) `(pariah ,p)]
         [,x x])))
   (define Effect
     (lambda (e)
@@ -3427,6 +3472,7 @@
          `(if ,cond ,conseq ,alter)]
         [(begin ,[Effect -> effect*] ... ,[Effect -> effect])
          (make-begin `(,effect* ... ,effect))]
+        [(pariah ,[Effect -> e]) `(pariah ,e)]
         [,x x])))
   (lambda (p)
     (match-with-default-wrappers p
@@ -3448,6 +3494,7 @@
           [(begin ,effect* ... ,tail)
            (let-values ([(effect*^ offset^) ((Effect* offset) effect*)])
              `(begin ,effect*^ ... ,((Tail offset^) tail)))]
+          [(pariah ,[(Tail offset) -> t]) `(pariah ,t)]
           [(,[(Triv offset) -> triv]) (list triv)]))))
   (define Pred
     (lambda (offset)
@@ -3463,6 +3510,7 @@
            (let*-values ([(effect*^ offset^) ((Effect* offset) effect*)]
                          [(pred^ offset^^) ((Pred offset^) pred)])
              (values `(begin ,effect*^ ... ,pred^) offset^^))]
+          [(pariah ,[(Pred offset) -> p offset^]) (values `(pariah ,p) offset^)]
           [(,rel ,[(Triv offset) -> left] ,[(Triv offset) -> right])
            (values `(,rel ,left ,right) offset)]
           [,x (values x offset)]))))
@@ -3506,7 +3554,8 @@
           [(begin ,effect* ... ,effect)
            (let*-values ([(effect*^ offset^) ((Effect* offset) effect*)]
                          [(effect^ offset^^) ((Effect offset^) effect)])
-             (values `(begin ,effect*^ ... ,effect^) offset^^))]))))
+             (values `(begin ,effect*^ ... ,effect^) offset^^))]
+          [(pariah ,[(Effect offset) -> e offset^]) (values `(pariah ,e) offset^)]))))
   (define Var
     (lambda (offset)
       (lambda (v)
@@ -3520,9 +3569,18 @@
 
 (define-who expose-basic-blocks
   (define frame-information)
+  (define pariah-blocks)
+  (define Pariah
+    (lambda (x b)
+      (let ([p (unique-label 'p)])
+        (set! pariah-blocks
+          (cons `[,p (lambda () ,x)]
+            (append b pariah-blocks)))
+        (values (list p) '()))))
   (define Program
     (lambda (p)
       (set! frame-information '())
+      (set! pariah-blocks '())
       (match-with-default-wrappers p
         [(letrec ([,label* (lambda () ,[Tail -> body* block*])] ...) ,[Tail -> body block])
          (letrec ([pair (lambda (headers others)
@@ -3532,7 +3590,7 @@
                                 (pair (cdr headers) (cdr others)))))])
            (let ([blocks (pair `([,label* (lambda () ,body*)] ...) block*)])
              `(with-frame-information ,frame-information
-                (letrec ,(append block blocks)
+                (letrec ,(append block blocks pariah-blocks)
                   ,body))))])))
   (define Tail
     (lambda (t)
@@ -3548,6 +3606,7 @@
                             (cons `[,c (lambda () ,conseq)]
                               (append b1
                                 (cons `[,a (lambda () ,alter)] b2)))))))]
+        [(pariah ,[Tail -> t b]) (Pariah t b)]
         [,x (values x '())])))
   (define Pred
     (lambda (c a)
@@ -3568,6 +3627,7 @@
           [(begin ,effect* ... ,[(Pred c a) -> tail b1])
            (let-values ([(tail^ b2) ((Effect* tail) effect*)])
              (values tail^ (append b2 b1)))]
+          [(pariah ,[(Pred c a) -> p b]) (Pariah p b)]
           [(,rel ,x1 ,x2)
            (values `(if (,rel ,x1 ,x2) (,c) (,a)) '())]))))
   (define Effect
@@ -3594,6 +3654,7 @@
           [(begin ,effect* ... ,[(Effect k) -> tail b1])
            (let-values ([(tail^ b2) ((Effect* tail) effect*)])
              (values tail^ (append b2 b1)))]
+          [(pariah ,[(Effect k) -> e b]) (Pariah e b)]
           [,x (values (make-begin `(,x ,k)) '())]))))
   (define Effect*
     (lambda (k)
