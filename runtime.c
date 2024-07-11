@@ -47,10 +47,14 @@ static void print(long x);
 /* local stack/heap management variables */
 static long pagesize;
 static long original_heapsize;
-static char *heap;
+
 static char *stack;
-static long heapsize;
 static long stacksize;
+
+static char *heap;
+static long heapsize;
+static int heap_index;
+static char *two_heap[2];
 
 /* long gc_time; */
 
@@ -95,8 +99,11 @@ int main(int argc, char *argv[]) {
   heapsize = ((heapsize + pagesize - 1) / pagesize) * pagesize;
   original_heapsize = heapsize;
 
+  heap_index = 0;
   stack = guarded_area(stacksize);
-  heap = guarded_area(heapsize);
+  two_heap[0] = guarded_area(heapsize);
+  two_heap[1] = guarded_area(heapsize);
+  heap = two_heap[0];
 
  /* Set up segmentation fault signal handler to catch stack and heap
   * overflow and some memory faults */
@@ -589,42 +596,42 @@ static void free_area(char *addr, long n) {
   munmap(addr - pagesize, n + 2 * pagesize);
 }
 
-static char *unguarded_area(long n) {
-  char *addr;
+/* static char *unguarded_area(long n) { */
+/*   char *addr; */
 
- /* allocate, leaving room for guard pages */
-  addr = (char *)mmap(NULL,
-                      (size_t)(n + 2 * pagesize),
-                      PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANON,
-                      -1, 0);
-  if (addr == (char *)-1) {
-    fprintf(stderr, "mmap failed: %s\n", strerror(errno));
-    exit(2);
-  }
+/*  /\* allocate, leaving room for guard pages *\/ */
+/*   addr = (char *)mmap(NULL, */
+/*                       (size_t)(n + 2 * pagesize), */
+/*                       PROT_READ | PROT_WRITE, */
+/*                       MAP_PRIVATE | MAP_ANON, */
+/*                       -1, 0); */
+/*   if (addr == (char *)-1) { */
+/*     fprintf(stderr, "mmap failed: %s\n", strerror(errno)); */
+/*     exit(2); */
+/*   } */
 
-  return addr + pagesize;
-}
+/*   return addr + pagesize; */
+/* } */
 
-static void fit_heap(char *addr, long new, long n) {
-  addr = mremap(addr - pagesize,
-                (size_t)(new + 2 * pagesize),
-                (size_t)(n + 2 * pagesize),
-                0);
-  if (addr == (char *)-1) {
-    fprintf(stderr, "mremap failed: %s\n", strerror(errno));
-    exit(2);
-  }
-}
+/* static void fit_heap(char *addr, long new, long n) { */
+/*   addr = mremap(addr - pagesize, */
+/*                 (size_t)(new + 2 * pagesize), */
+/*                 (size_t)(n + 2 * pagesize), */
+/*                 0); */
+/*   if (addr == (char *)-1) { */
+/*     fprintf(stderr, "mremap failed: %s\n", strerror(errno)); */
+/*     exit(2); */
+/*   } */
+/* } */
 
-static void guard_area(char *addr, long n) {
- /* remove access rights from the guard pages */
-  if (mprotect(addr - pagesize, (size_t)pagesize, PROT_NONE) ||
-    mprotect(addr + n, (size_t)pagesize, PROT_NONE)) {
-    fprintf(stderr, "mprotect failed: %s\n", strerror(errno));
-    exit(3);
-  }
-}
+/* static void guard_area(char *addr, long n) { */
+/*  /\* remove access rights from the guard pages *\/ */
+/*   if (mprotect(addr - pagesize, (size_t)pagesize, PROT_NONE) || */
+/*     mprotect(addr + n, (size_t)pagesize, PROT_NONE)) { */
+/*     fprintf(stderr, "mprotect failed: %s\n", strerror(errno)); */
+/*     exit(3); */
+/*   } */
+/* } */
 
 /* #include <time.h> */
 
@@ -641,40 +648,41 @@ ptr collect(ptr **allocation_pointer, ptr **end_of_allocation,
   long tag = TAG(tagged, mask_pair); /* all objects share this tag */
   long extra = (long)exceeded_ap - UNTAG(tagged, tag);
 
-  long new_heapsize = heapsize;
-  do
-    new_heapsize *= 2;
-  while (new_heapsize <= heapsize + extra);
-
-  new_heap = (ptr *)unguarded_area(new_heapsize);
-  new_heap_end = (ptr *)((char *)new_heap + new_heapsize);
+  new_heap = (ptr *)two_heap[1 - heap_index];
+  new_heap_end = (ptr *)((char *)new_heap + heapsize);
   alloc_ptr = new_heap;
   ptr *scan_ptr = new_heap;
-
   collect_stack(ra, top);
   while (scan_ptr < alloc_ptr)
     scan_ptr = collect_one(scan_ptr);
 
-  free_area(heap, heapsize);
-
   long used = (char *)alloc_ptr - (char *)new_heap;
-  /* fprintf(stderr, "  live data:     %ld \tbytes\n", used); */
-  heapsize = new_heapsize;
-  while ((used + extra) <= heapsize / 2 &&
-         heapsize / 2 >= original_heapsize * sizeof(void *))
-    heapsize /= 2;
-  /* fprintf(stderr, "  new heap size: %ld \tbytes\n", heapsize); */
-  if (heapsize < new_heapsize) {
-    fit_heap((char *)new_heap,
-             new_heapsize,
-             heapsize);
-    new_heap_end = (ptr *)((char *)new_heap + heapsize);
+  long new_heapsize = heapsize;
+  while (new_heapsize < 2 * (used + extra))
+    new_heapsize *= 2;
+  if (new_heapsize > heapsize) {
+    free_area(heap, heapsize);
+    two_heap[heap_index] = guarded_area(new_heapsize);
+
+    heap = (char *)new_heap;
+    new_heap = (ptr *)two_heap[heap_index];
+    new_heap_end = (ptr *)((char *)new_heap + new_heapsize);
+    alloc_ptr = new_heap;
+    ptr *scan_ptr = new_heap;
+    collect_stack(ra, top);
+    while (scan_ptr < alloc_ptr)
+      scan_ptr = collect_one(scan_ptr);
+
+    free_area(heap, heapsize);
+    two_heap[1 - heap_index] = guarded_area(new_heapsize);
+    heapsize = new_heapsize;
+  } else {
+    heap_index = 1 - heap_index;
   }
-  guard_area((char *)new_heap, heapsize);
 
   heap = (char *)new_heap;
   *allocation_pointer = (ptr *)((char *)alloc_ptr + extra);
-  *end_of_allocation = new_heap_end;
+  *end_of_allocation = (ptr *)((char *)heap + heapsize);
 
   /* clock_gettime(CLOCK_REALTIME, &end); */
   /* long nanosec = (end.tv_sec - begin.tv_sec) * 1e9 + end.tv_nsec - begin.tv_nsec; */
