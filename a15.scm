@@ -3570,6 +3570,10 @@
 (define-who expose-basic-blocks
   (define frame-information)
   (define pariah-blocks)
+  (define reorder
+    (lambda (bs1 bs2)
+      (cond [(>= (length bs1) (length bs2)) (append bs1 bs2)]
+            [else (append bs2 bs1)])))
   (define Pariah
     (lambda (x b)
       (let ([p (unique-label 'p)])
@@ -3603,9 +3607,9 @@
                [a (unique-label 'a)])
            (let-values ([(tail b3) ((Pred c a) cond)])
              (values tail (append b3
-                            (cons `[,c (lambda () ,conseq)]
-                              (append b1
-                                (cons `[,a (lambda () ,alter)] b2)))))))]
+                            (reorder
+                              (cons `[,c (lambda () ,conseq)] b1)
+                              (cons `[,a (lambda () ,alter)] b2))))))]
         [(pariah ,[Tail -> t b]) (Pariah t b)]
         [,x (values x '())])))
   (define Pred
@@ -3621,9 +3625,9 @@
                    [a^ (unique-label 'a)])
                (let-values ([(tail b3) ((Pred c^ a^) cond)])
                  (values tail (append b3
-                                (cons `[,c^ (lambda () ,c-t)]
-                                  (append b1
-                                    (cons `[,a^ (lambda () ,a-t)] b2))))))))]
+                                (reorder
+                                  (cons `[,c^ (lambda () ,c-t)] b1)
+                                  (cons `[,a^ (lambda () ,a-t)] b2)))))))]
           [(begin ,effect* ... ,[(Pred c a) -> tail b1])
            (let-values ([(tail^ b2) ((Effect* tail) effect*)])
              (values tail^ (append b2 b1)))]
@@ -3645,12 +3649,12 @@
              (let-values ([(c-t b1) ((Effect (list j)) conseq)]
                           [(a-t b2) ((Effect (list j)) alter)]
                           [(tail b3) ((Pred c a) cond)])
-               (values tail (append b3
-                              (cons `[,c (lambda () ,c-t)]
-                                (append b1
-                                  (cons `[,a (lambda () ,a-t)]
-                                    (append b2
-                                      (list `[,j (lambda () ,k)])))))))))]
+               (values tail (append
+                              b3
+                              (reorder
+                                (cons `[,c (lambda () ,c-t)] b1)
+                                (cons `[,a (lambda () ,a-t)] b2))
+                              (list `[,j (lambda () ,k)])))))]
           [(begin ,effect* ... ,[(Effect k) -> tail b1])
            (let-values ([(tail^ b2) ((Effect* tail) effect*)])
              (values tail^ (append b2 b1)))]
