@@ -389,15 +389,22 @@
     [() (test-all #t #t)]
     [(emit?) (test-all emit? #t)]
     [(emit? verbose?)
-     (let f ([tests tests] [n 0])
-       (unless (null? tests)
-         (when verbose?
-           (let ([s (format "~s: " n)])
-             (display s)
-             (parameterize ([pretty-initial-indent (string-length s)])
-               (pretty-print (car tests)))))
-         ($test-one (car tests) emit? verbose? n)
-         (f (cdr tests) (+ n 1))))]))
+     (parameterize ([use-precompiled-runtime emit?])
+       (define shell
+         (lambda (s . args)
+           (system (apply format s args))))
+       (when emit?
+         (unless (= (shell "~a -m64 -O2 -c runtime.c 2>&1" (c-compiler)) 0)
+           (format-error 'test-all "build error(s)")))
+       (let f ([tests tests] [n 0])
+         (unless (null? tests)
+           (when verbose?
+             (let ([s (format "~s: " n)])
+               (display s)
+               (parameterize ([pretty-initial-indent (string-length s)])
+                 (pretty-print (car tests)))))
+           ($test-one (car tests) emit? verbose? n)
+           (f (cdr tests) (+ n 1)))))]))
 
 (define print-file
   (lambda (path)

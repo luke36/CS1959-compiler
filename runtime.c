@@ -16,7 +16,7 @@
 #include <locale.h>
 
 #define stack_size 100000
-#define heap_size  100000
+#define heap_size  1000000
 
 #ifdef __APPLE__
 #define SCHEME_ENTRY scheme_entry

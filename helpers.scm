@@ -761,6 +761,13 @@
         (format-error 'who "~s is not a string" s))
       s)))
 
+(define use-precompiled-runtime
+  (make-parameter #f
+    (lambda (x)
+      (unless (boolean? x)
+        (format-error 'use-precompiled-runtime "~s is not a boolean" x))
+      x)))
+
 (define-who build-and-run
   (define file-root "t")
   (define shell
@@ -778,7 +785,10 @@
         (newline)
         (display-string output-string))
       'replace)
-    (unless (= (shell "~a -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
+    (unless
+        (if use-precompiled-runtime
+            (= (shell "~a -m64 -o ~a runtime.o helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
+            (= (shell "~a -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0))
       (printf "========\n")
       (shell "cat ~a" out-file)
       (format-error who "build error(s)"))

@@ -2059,7 +2059,7 @@
                           xp (- expr disp)))]
                [else
                  (values `(set! ,uvar
-                            ,(if (zero? (+ i disp))
+                            ,(if (zero? (+ i disp)) ; impossible?
                                  xp
                                  `(+ ,xp ,(+ i disp))))
                          xp (+ i expr))])]
