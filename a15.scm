@@ -21,7 +21,6 @@
 (define *optimize-jumps-enabled* #t)
 (define *max-inline-literal-size* 64)
 (define *collection-enabled* #t)
-(define *max-conservative-range* 1024) ; may ask for more space than actually needed
 (define *continuation-enabled* #t)
 (define *optimize-allocation-enabled* #t)
 
@@ -946,7 +945,8 @@
                [lab* (map unique-label uvar*)])
            `(letrec ([,lab* (lambda (,cp* ,formal** ...)
                               (bind-free (,cp* ,fv** ...) ,body*))] ...)
-              (closures ([,uvar* ,lab* ,fv** ...] ...) ,body)))]
+              (closures ([,uvar* ,lab* ,fv** ...] ...)
+                (well-known () ,body))))]
         [(,prim ,[Expr -> rand*] ...) (guard (primitive? prim))
          `(,prim ,rand* ...)]
         [(quote ,imm) e]
@@ -972,12 +972,14 @@
            `(let ([,uvar* ,body*] ...) ,body)]
           [(letrec ([,lab* (lambda (,formal** ...)
                              (bind-free (,cp* ,fv** ...) ,body*))] ...)
-             (closures ([,uvar* ,data** ...] ...) ,body))
+             (closures ([,uvar* ,data** ...] ...)
+               (well-known () ,body)))
            (let* ([known^ (append uvar* known)]
                   [body*^ (map (Expr known^) body*)])
              `(letrec ([,lab* (lambda (,formal** ...)
                                 (bind-free (,cp* ,fv** ...) ,body*^))] ...)
-                (closures ([,uvar* ,data** ...] ...) ,((Expr known^) body))))]
+                (closures ([,uvar* ,data** ...] ...)
+                  (well-known () ,((Expr known^) body)))))]
           [(,prim ,[(Expr known) -> rand*] ...) (guard (primitive? prim))
            `(,prim ,rand* ...)]
           [(quote ,imm) e]
@@ -1003,7 +1005,8 @@
          (values `(let ([,x* ,e*] ...) ,body) (apply union u u*))]
         [(letrec ([,lab* (lambda (,fml** ...)
                            (bind-free (,cp* ,fv** ...) ,[body* u*]))] ...)
-           (closures ([,f* ,data** ...] ...) ,[body u]))
+           (closures ([,f* ,data** ...] ...)
+             (well-known () ,[body u])))
          (let ([u^ (apply union u u*)])
            (values
              `(letrec ([,lab* (lambda (,fml** ...)
