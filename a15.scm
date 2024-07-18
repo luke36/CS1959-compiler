@@ -1494,7 +1494,7 @@
                            ,tmp2)))))]
         [(void) $void]
         [(,[Value -> proc] ,[Value -> arg*] ...)
-         (apply trivialize ; instruction address is evil
+         (apply trivialize ; instruction address is evil (really?)
            (lambda arg*
              (trivialize
                (lambda (proc)
@@ -2992,9 +2992,14 @@
             [(mset! ,base ,offset ,expr)
              (liveset-cons base (liveset-cons offset (liveset-cons expr post)))]
             [(set! rdx (sign-of rax))
-             (set-cons 'rax (difference post '(rdx)))]
+             (let ([post-rhs (difference post '(rdx))])
+               (add-conflict-list 'rdx post-rhs)
+               (set-cons 'rax post-rhs))]
             [(set! (rax rdx) (quotient (rax rdx) ,y))
-             (liveset-cons y (set-cons 'rdx (set-cons 'rax post)))]
+             (let ([post-rhs (difference post '(rdx rax))])
+               (add-conflict-list 'rax post-rhs)
+               (add-conflict-list 'rdx post-rhs)
+               (liveset-cons y (set-cons 'rdx (set-cons 'rax post-rhs))))]
             [(set! ,v (,rator ,x ,y))
              (let ([post-rhs (difference post (list v))])
                (add-conflict-list v post-rhs)
@@ -3747,11 +3752,13 @@
                                [else
                                  (let* ([lab (car label*)]
                                         [info
-                                          (cond [(assq lab closure-length) =>
+                                          (cond [(and *collection-enabled*
+                                                      (assq lab closure-length)) =>
                                                  (lambda (l) `((align 8) ; hard coded...
                                                                (zeros ,tag-procedure) ; `align' code address
                                                                (quad ,(cadr l))))]
-                                                [(assq lab frame-information) =>
+                                                [(and *collection-enabled*
+                                                      (assq lab frame-information)) =>
                                                  (lambda (i) `((live-mask
                                                                  ,(sra (cadr i) align-shift)
                                                                  ,(map frame-var->index (caddr i)))

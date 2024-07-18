@@ -95,44 +95,45 @@ _scheme_symbol_to_address:
     .globl _scheme_call_with_current_continuation
 _scheme_call_with_current_continuation:
 CALLCC_CHECK_OVERFLOW:
-    movq %r11, %rcx
-    addq %rbp, %rcx
-    subq %r14, %rcx
-    addq $24, %rcx
-    cmpq %r13, %rcx
+    movq %r8, %r12
+    leaq 2(%r11), %r8
+    addq $24, %r11
+    movq %rbp, %r9
+    subq %r14, %r9
+    addq %r9, %r11
+#ifdef COLLECTION
+    cmpq %r13, %r11
     jle CALLCC_MAKE_CONT
 CALLCC_COLLECT:
-    subq %r13, %rcx
-    movq %r15, %rdi
-    movq %rbp, %rsi
-    leaq 0(%rbp), %rdx
-    movq %r8, %r12
-    call collect
-    movq %r12, %r8
-    movq %rax, %r11
-    movq 0(%rbp), %r13
-CALLCC_MAKE_CONT:
+    leaq 0(%rbp), %rdi
+    leaq 8(%rbp), %rsi
+    movq %r15, %rdx
+    movq %rbp, %rcx
     movq %r11, %r9
-    addq $2, %r9
-    addq $24, %r11
+    call collect
+    movq 0(%rbp), %r11
+    movq 8(%rbp), %r13
+    movq %rax, %r8
+CALLCC_MAKE_CONT:
+#endif
     leaq _scheme_invoke_continuation(%rip), %r10
-    movq %r10, -2(%r9)
-    movq %r15, 6(%r9)
+    movq %r10, -2(%r8)
+    movq %r15, 6(%r8)
     movq %rbp, %rcx
     subq %r14, %rcx
-    movq %rcx, 14(%r9)
+    movq %rcx, 14(%r8)
     movq $0, %rbx
 CALLCC_LOOP_ENTRY:
     cmpq %rbx, %rcx
     je CALLCC_APPLY
 CALLCC_DO_COPY:
     movq 0(%rbx, %r14), %r10
-    movq %r10, 0(%r11, %rbx)
+    movq %r10, 22(%r8, %rbx)
     addq $8, %rbx
     jmp CALLCC_LOOP_ENTRY
 CALLCC_APPLY:
-    addq %rcx, %r11
-    jmp *-2(%r8)
+    movq %r8, %r9
+    jmp *-2(%r12)
 
     .quad -1
 _scheme_invoke_continuation:

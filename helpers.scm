@@ -786,9 +786,9 @@
         (display-string output-string))
       'replace)
     (unless
-        (if use-precompiled-runtime
-            (= (shell "~a -m64 -o ~a runtime.o helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0)
-            (= (shell "~a -m64 -o ~a runtime.c helper.s ~a > ~a 2>&1" (c-compiler) exe-file src-file out-file) 0))
+        (if (use-precompiled-runtime)
+            (= (shell "~a -m64 -o ~a runtime.o helper.S ~a ~a > ~a 2>&1" (c-compiler) exe-file src-file (if *collection-enabled* "-DCOLLECTION" "") out-file) 0)
+            (= (shell "~a -m64 -o ~a runtime.c helper.S ~a ~a > ~a 2>&1" (c-compiler) exe-file src-file (if *collection-enabled* "-DCOLLECTION" "") out-file) 0))
       (printf "========\n")
       (shell "cat ~a" out-file)
       (format-error who "build error(s)"))

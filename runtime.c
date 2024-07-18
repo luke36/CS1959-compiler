@@ -417,7 +417,7 @@ static void print(long x) {
 
 #define FRAME_SIZE(x) (*(long *)((long)x + disp_frame_size))
 #define LIVE_MASK_END(x) ((char *)((long)x + disp_live_mask_end))
-#define ITH_LIVE(s, i) (*(s + ((i - 1) >> 3)) & (1 << (i & 0b111)))
+#define ITH_LIVE(s, i) (*(s + (i >> 3)) & (1 << (i & 0b111)))
 #define MAXFRAME 100
 
 static ptr walk(void *ra, ptr *top) {
