@@ -1494,13 +1494,7 @@
                            ,tmp2)))))]
         [(void) $void]
         [(,[Value -> proc] ,[Value -> arg*] ...)
-         (apply trivialize ; instruction address is evil (really?)
-           (lambda arg*
-             (trivialize
-               (lambda (proc)
-                 `(,proc ,arg* ...))
-               proc))
-           arg*)]
+         `(,proc ,arg* ...)]
         [,x x])))
   (define Pred
     (lambda (p)
@@ -1795,12 +1789,12 @@
              [eff* (apply append (map car effs-triv*))]
              [triv* (map cdr effs-triv*)])
         (make-begin `(,@eff* (,rator ,@triv*))))))
-  (define process-procedure-call ; instruction address is evil
+  (define process-procedure-call
     (lambda (rator rand*)
       (let* ([effs-triv* (map trivialize (cons rator rand*))]
              [eff* (apply append (map car effs-triv*))]
              [triv* (map cdr effs-triv*)])
-        (make-begin `(,@eff* (,(car triv*) ,@(cdr triv*)))))))
+        (make-begin `(,@eff* ,triv*)))))
   (define Body
     (lambda (b)
       (match b
@@ -3957,7 +3951,8 @@
        (emit 'popq 'rbx)
        (emit 'ret))]))
 
-(module (use-reverse-buffer with-reverse-buffer reverse-put)
+(module ((reverse-put)
+         (with-reverse-buffer use-reverse-buffer))
   (define reverse-buffer)
   (define reverse-size)
   (define reverse-max)
